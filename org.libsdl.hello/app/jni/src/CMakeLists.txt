@@ -24,6 +24,7 @@ Possible ways to fix this:
 endif()
 
 add_library(main SHARED
-    hello.c
+    hello.cc
+    vk.cc
 )
-target_link_libraries(main PRIVATE SDL3::SDL3)
+target_link_libraries(main PRIVATE SDL3::SDL3 vulkan)
