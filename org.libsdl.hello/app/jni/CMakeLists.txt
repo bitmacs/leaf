@@ -7,6 +7,7 @@ add_compile_options(-fno-rtti)
 
 # SDL sources are in a subfolder named "SDL"
 add_subdirectory(SDL)
+add_subdirectory(glm)
 
 # Compilation of companion libraries
 #add_subdirectory(SDL_image)

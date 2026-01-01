@@ -26,5 +26,8 @@ endif()
 add_library(main SHARED
     hello.cc
     vk.cc
+    meshes.cc
+    tasks.cc
+    files.cc
 )
-target_link_libraries(main PRIVATE SDL3::SDL3 vulkan)
+target_link_libraries(main PRIVATE SDL3::SDL3 vulkan glm)

@@ -10,22 +10,33 @@
   freely.
 */
 #define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
+#include "files.h"
+#include "meshes.h"
 #include "semaphores.h"
+#include "tasks.h"
 #include "vk.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <unordered_set>
 
 #define MAX_FRAMES_IN_FLIGHT 2
+
+struct FrameState {
+    std::unordered_set<uint32_t> mesh_buffers_handles; // keep track of which mesh buffers are used in this frame
+};
 
 struct AppState {
     uint32_t width;
     uint32_t height;
 };
+
+static TaskSystem task_system = {};
+static MeshBuffersRegistry mesh_buffers_registry = {};
 static SDL_Window *window = NULL;
 
 static VkContext vk_context = {};
-static Uint64 last_frame_time = 0;
-static Uint32 frame_index = 0;
+static uint64_t last_frame_time = 0;
+static uint32_t frame_index = 0;
 
 static std::vector<VkFence> fences = {}; // each in-flight frame has a fence
 static std::vector<VkCommandBuffer> command_buffers = {}; // each in-flight frame has one command buffer
@@ -36,17 +47,22 @@ static std::vector<VkSemaphore> render_complete_semaphores = {}; // each swapcha
 static SemaphorePool semaphore_pool = {}; // currently used for image acquired semaphores and render complete semaphores of each swapchain image, each in-flight frame has one semaphore pool
 
 // 离屏渲染资源（每个 in-flight 帧一份）
-std::vector<VkImage> depth_images;
-std::vector<VkImage> color_images;
-std::vector<VkDeviceMemory> depth_image_memories;
-std::vector<VkDeviceMemory> color_image_memories;
-std::vector<VkImageView> depth_image_views;
-std::vector<VkImageView> color_image_views;
-std::vector<VkFramebuffer> framebuffers;
+static std::vector<VkImage> depth_images;
+static std::vector<VkImage> color_images;
+static std::vector<VkDeviceMemory> depth_image_memories;
+static std::vector<VkDeviceMemory> color_image_memories;
+static std::vector<VkImageView> depth_image_views;
+static std::vector<VkImageView> color_image_views;
+static std::vector<VkFramebuffer> framebuffers;
+
+static std::vector<FrameState> frame_states = {}; // each in-flight frame has one frame state
+static std::vector<uint32_t> mesh_buffers_handles = {};
 
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
 {
+    start_task_system(&task_system);
+
     bool init_succeed = SDL_Init(SDL_INIT_VIDEO);
     assert(init_succeed);
 
@@ -66,6 +82,9 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     vk_context.depth_image_format = VK_FORMAT_D16_UNORM;
     create_command_pool(&vk_context);
     create_render_pass(&vk_context);
+    create_descriptor_set_layout(&vk_context);
+    create_pipeline_layout(&vk_context, sizeof(PushConstants));
+    create_pipelines(&vk_context);
 
     image_acquired_semaphores.resize(vk_context.swapchain_images.size(), VK_NULL_HANDLE);
     render_complete_semaphores.resize(vk_context.swapchain_images.size(), VK_NULL_HANDLE);
@@ -101,6 +120,12 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         create_framebuffer(&vk_context, vk_context.render_pass, std::size(attachments), attachments, app_state->width, app_state->height, &framebuffers[i]);
     }
 
+    frame_states.resize(MAX_FRAMES_IN_FLIGHT);
+
+    MeshData mesh_data = generate_triangle_mesh_data();
+    uint32_t mesh_buffers_handle = request_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, std::move(mesh_data));
+    mesh_buffers_handles.push_back(mesh_buffers_handle);
+
     last_frame_time = SDL_GetTicksNS(); // 初始化第一帧的时间
     return SDL_APP_CONTINUE;
 }
@@ -134,6 +159,12 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     result = vkResetFences(vk_context.device, 1, &fences[frame_index]);
     assert(result == VK_SUCCESS);
 
+    // previous frame has been rendered, release the referenced mesh buffers
+    for (uint32_t mesh_buffers_handle : frame_states[frame_index].mesh_buffers_handles) {
+        decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
+    }
+    frame_states[frame_index].mesh_buffers_handles.clear();
+
     // acquire the next image
     uint32_t image_index;
     VkSemaphore image_acquired_semaphore = semaphore_pool.acquire_semaphore(&vk_context);
@@ -155,6 +186,33 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     clear_values[0].color = {.float32 = {0.5f, 1.0f, 0.8f}}; // 薄荷绿
     clear_values[1].depthStencil = {.depth = 1.0f, .stencil = 0};
     begin_render_pass(&vk_context, command_buffer, vk_context.render_pass, framebuffers[frame_index], app_state->width, app_state->height, 2, clear_values);
+
+    for (uint32_t mesh_buffers_handle : mesh_buffers_handles) {
+        if (!is_mesh_buffers_uploaded(&mesh_buffers_registry, mesh_buffers_handle)) { continue; } // skip if mesh buffers are not uploaded yet
+        frame_states[frame_index].mesh_buffers_handles.insert(mesh_buffers_handle);
+        increment_ref_mesh_buffers(&mesh_buffers_registry, mesh_buffers_handle);
+
+        PipelineKey pipeline_key = {};
+        pipeline_key.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        pipeline_key.polygon_mode = VK_POLYGON_MODE_FILL;
+        pipeline_key.depth_test_enabled = true;
+        pipeline_key.depth_write_enabled = true;
+        pipeline_key.shaders_hash = hash_strings("triangle", "triangle");
+        VkPipeline pipeline = get_pipeline(&vk_context, pipeline_key);
+        vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        set_viewport(command_buffer, 0, 0, app_state->width, app_state->height);
+        set_scissor(command_buffer, 0, 0, app_state->width, app_state->height);
+        VkDeviceSize offsets[] = {0};
+        MeshBuffers mesh_buffers = mesh_buffers_registry.entries[mesh_buffers_handle].mesh_buffers;
+        vkCmdBindVertexBuffers(command_buffer, 0, 1, &mesh_buffers.vertex_buffer, offsets);
+        if (mesh_buffers.index_count > 0) {
+            vkCmdBindIndexBuffer(command_buffer, mesh_buffers.index_buffer, 0, mesh_buffers.index_type);
+            vkCmdDrawIndexed(command_buffer, mesh_buffers.index_count, 1, 0, 0, 0);
+        } else {
+            vkCmdDraw(command_buffer, mesh_buffers.vertex_count, 1, 0, 0);
+        }
+    }
+
     end_render_pass(&vk_context, command_buffer);
 
     {
@@ -246,6 +304,17 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
 {
     vkDeviceWaitIdle(vk_context.device);
+    for (FrameState &frame_state : frame_states) {
+        for (uint32_t mesh_buffers_handle : frame_state.mesh_buffers_handles) {
+            decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
+        }
+        frame_state.mesh_buffers_handles.clear();
+    }
+    frame_states.clear();
+    for (uint32_t mesh_buffers_handle : mesh_buffers_handles) {
+        decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
+    }
+    mesh_buffers_handles.clear();
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         vkDestroyFramebuffer(vk_context.device, framebuffers[i], nullptr);
         vkDestroyImageView(vk_context.device, color_image_views[i], nullptr);
@@ -279,6 +348,7 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     semaphore_pool.cleanup(&vk_context);
     cleanup_vulkan(&vk_context);
     SDL_DestroyWindow(window);
+    stop_task_system(&task_system);
     SDL_Quit();
     SDL_Log("see you");
 }
