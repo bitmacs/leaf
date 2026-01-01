@@ -248,22 +248,29 @@ void create_device(VkContext *context) {
     }
 
     vkGetDeviceQueue(context->device, context->queue_family_index, 0, &context->queue);
+
+    // 加载动态函数（Vulkan 1.3 核心函数，但某些实现可能需要动态加载）
+    context->vkCmdSetCullMode = LOAD_DEVICE_PROC_ADDR(context->device, vkCmdSetCullMode);
+    assert(context->vkCmdSetCullMode && "vkCmdSetCullMode not available");
 }
 
 void create_swapchain(VkContext *context, uint32_t width, uint32_t height) {
     // get supported formats
     uint32_t format_count = 0;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(context->physical_device, context->surface, &format_count, nullptr);
+    VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(context->physical_device, context->surface, &format_count, nullptr);
+    VK_CHECK(result);
     assert(format_count > 0);
 
     std::vector<VkSurfaceFormatKHR> formats(format_count);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(context->physical_device, context->surface, &format_count, formats.data());
+    result = vkGetPhysicalDeviceSurfaceFormatsKHR(context->physical_device, context->surface, &format_count, formats.data());
+    VK_CHECK(result);
 
     VkFormat surface_format = formats[0].format;
     VkColorSpaceKHR surface_color_space = formats[0].colorSpace;
 
     VkSurfaceCapabilitiesKHR surface_capabilities;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context->physical_device, context->surface, &surface_capabilities);
+    result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context->physical_device, context->surface, &surface_capabilities);
+    VK_CHECK(result);
 
     uint32_t min_image_count = 2;
     if (surface_capabilities.minImageCount > min_image_count) {
@@ -309,7 +316,7 @@ void create_swapchain(VkContext *context, uint32_t width, uint32_t height) {
     swapchain_create_info.clipped = VK_TRUE;
     swapchain_create_info.oldSwapchain = VK_NULL_HANDLE;
 
-    VkResult result = vkCreateSwapchainKHR(context->device, &swapchain_create_info, nullptr, &context->swapchain);
+    result = vkCreateSwapchainKHR(context->device, &swapchain_create_info, nullptr, &context->swapchain);
     assert(result == VK_SUCCESS);
 
     context->surface_format = surface_format;
@@ -442,6 +449,16 @@ void allocate_memory(VkContext *context, VkDeviceSize size, uint32_t memory_type
     assert(result == VK_SUCCESS);
 }
 
+void allocate_descriptor_set(VkContext *context, VkDescriptorPool descriptor_pool, VkDescriptorSet *descriptor_set) {
+    VkDescriptorSetAllocateInfo descriptor_set_allocate_info = {};
+    descriptor_set_allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    descriptor_set_allocate_info.descriptorPool = descriptor_pool;
+    descriptor_set_allocate_info.descriptorSetCount = 1;
+    descriptor_set_allocate_info.pSetLayouts = &context->descriptor_set_layout;
+    VkResult result = vkAllocateDescriptorSets(context->device, &descriptor_set_allocate_info, descriptor_set);
+    assert(result == VK_SUCCESS);
+}
+
 void create_image(VkContext *context, VkFormat format, uint32_t width, uint32_t height, VkImageUsageFlags usage, VkImage *image, VkDeviceMemory *image_memory) {
     VkImageCreateInfo image_create_info = {};
     image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -500,7 +517,7 @@ void create_framebuffer(VkContext *context, VkRenderPass render_pass, uint32_t a
     assert(result == VK_SUCCESS);
 }
 
-void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer) {
+void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_memory) {
     VkBufferCreateInfo buffer_create_info = {};
     buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_create_info.size = size;
@@ -510,12 +527,21 @@ void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usa
     buffer_create_info.pQueueFamilyIndices = &context->queue_family_index;
     VkResult result = vkCreateBuffer(context->device, &buffer_create_info, nullptr, buffer);
     assert(result == VK_SUCCESS);
+
+    VkMemoryRequirements memory_requirements;
+    vkGetBufferMemoryRequirements(context->device, *buffer, &memory_requirements);
+
+    uint32_t memory_type_index = UINT32_MAX;
+    get_memory_type_index(context, memory_requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &memory_type_index);
+
+    allocate_memory(context, memory_requirements.size, memory_type_index, buffer_memory);
+
+    vkBindBufferMemory(context->device, *buffer, *buffer_memory, 0);
 }
 
 void create_descriptor_set_layout(VkContext *context) {
     VkDescriptorSetLayoutBinding bindings[] = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2, VK_SHADER_STAGE_VERTEX_BIT, nullptr}, // camera array with 2 cameras
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // SSBO for picking result
     };
 
     VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info = {};
@@ -528,7 +554,7 @@ void create_descriptor_set_layout(VkContext *context) {
 
 void create_pipeline_layout(VkContext *context, size_t push_constant_size) {
     VkPushConstantRange push_constant_range = {};
-    push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     push_constant_range.offset = 0;
     push_constant_range.size = push_constant_size;
 

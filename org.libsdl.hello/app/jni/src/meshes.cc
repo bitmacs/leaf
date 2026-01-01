@@ -24,16 +24,7 @@ uint32_t request_mesh_buffers(MeshBuffersRegistry *mesh_buffers_registry, TaskSy
                 MeshBuffers mesh_buffers = {};
 
                 {
-                    create_buffer(context, sizeof(Vertex) * mesh_data.vertices.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &mesh_buffers.vertex_buffer);
-
-                    VkMemoryRequirements memory_requirements;
-                    vkGetBufferMemoryRequirements(context->device, mesh_buffers.vertex_buffer, &memory_requirements);
-
-                    uint32_t memory_type_index = UINT32_MAX;
-                    get_memory_type_index(context, memory_requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &memory_type_index);
-
-                    allocate_memory(context, memory_requirements.size, memory_type_index, &mesh_buffers.vertex_buffer_memory);
-                    vkBindBufferMemory(context->device, mesh_buffers.vertex_buffer, mesh_buffers.vertex_buffer_memory, 0);
+                    create_buffer(context, sizeof(Vertex) * mesh_data.vertices.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &mesh_buffers.vertex_buffer, &mesh_buffers.vertex_buffer_memory);
 
                     void *buffer_data = nullptr;
                     vkMapMemory(context->device, mesh_buffers.vertex_buffer_memory, 0, sizeof(Vertex) * mesh_data.vertices.size(), 0, &buffer_data);
@@ -44,16 +35,7 @@ uint32_t request_mesh_buffers(MeshBuffersRegistry *mesh_buffers_registry, TaskSy
                 }
 
                 if (!mesh_data.indices.empty()) {
-                    create_buffer(context, sizeof(uint32_t) * mesh_data.indices.size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &mesh_buffers.index_buffer);
-
-                    VkMemoryRequirements memory_requirements;
-                    vkGetBufferMemoryRequirements(context->device, mesh_buffers.index_buffer, &memory_requirements);
-
-                    uint32_t memory_type_index = UINT32_MAX;
-                    get_memory_type_index(context, memory_requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &memory_type_index);
-
-                    allocate_memory(context, memory_requirements.size, memory_type_index, &mesh_buffers.index_buffer_memory);
-                    vkBindBufferMemory(context->device, mesh_buffers.index_buffer, mesh_buffers.index_buffer_memory, 0);
+                    create_buffer(context, sizeof(uint32_t) * mesh_data.indices.size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &mesh_buffers.index_buffer, &mesh_buffers.index_buffer_memory);
 
                     void *buffer_data = nullptr;
                     vkMapMemory(context->device, mesh_buffers.index_buffer_memory, 0, sizeof(uint32_t) * mesh_data.indices.size(), 0, &buffer_data);

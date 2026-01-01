@@ -28,6 +28,7 @@ add_library(main SHARED
     vk.cc
     meshes.cc
     tasks.cc
+    camera.cc
     files.cc
 )
 target_link_libraries(main PRIVATE SDL3::SDL3 vulkan glm)

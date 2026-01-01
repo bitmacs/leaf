@@ -10,6 +10,7 @@
   freely.
 */
 #define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
+#include "camera.h"
 #include "files.h"
 #include "meshes.h"
 #include "semaphores.h"
@@ -23,6 +24,11 @@
 
 struct FrameState {
     std::unordered_set<uint32_t> mesh_buffers_handles; // keep track of which mesh buffers are used in this frame
+};
+
+struct CameraData {
+    glm::mat4 view;
+    glm::mat4 projection;
 };
 
 struct AppState {
@@ -56,7 +62,32 @@ static std::vector<VkImageView> color_image_views;
 static std::vector<VkFramebuffer> framebuffers;
 
 static std::vector<FrameState> frame_states = {}; // each in-flight frame has one frame state
+static Camera camera = {};
+static CameraData camera_data[2] = {}; // [0] = scene camera, [1] = ui camera
+static std::vector<VkBuffer> camera_buffers = {}; // each in-flight frame has one camera buffer
+static std::vector<VkDeviceMemory> camera_buffer_memories = {}; // each in-flight frame has one camera buffer memory
 static std::vector<uint32_t> mesh_buffers_handles = {};
+
+static void create_descriptor_pools(VkContext *context) {
+    descriptor_pools.resize(MAX_FRAMES_IN_FLIGHT);
+
+    VkDescriptorPoolSize descriptor_pool_sizes[] = {
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}, // camera buffer array (2 cameras)
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
+    };
+
+    VkDescriptorPoolCreateInfo descriptor_pool_create_info = {};
+    descriptor_pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    descriptor_pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    descriptor_pool_create_info.maxSets = 1;
+    descriptor_pool_create_info.poolSizeCount = std::size(descriptor_pool_sizes);
+    descriptor_pool_create_info.pPoolSizes = descriptor_pool_sizes;
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        VkResult result = vkCreateDescriptorPool(context->device, &descriptor_pool_create_info, nullptr, &descriptor_pools[i]);
+        assert(result == VK_SUCCESS);
+    }
+}
 
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
@@ -85,6 +116,11 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     create_descriptor_set_layout(&vk_context);
     create_pipeline_layout(&vk_context, sizeof(PushConstants));
     create_pipelines(&vk_context);
+    create_descriptor_pools(&vk_context);
+    descriptor_sets.resize(MAX_FRAMES_IN_FLIGHT);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        allocate_descriptor_set(&vk_context, descriptor_pools[i], &descriptor_sets[i]);
+    }
 
     image_acquired_semaphores.resize(vk_context.swapchain_images.size(), VK_NULL_HANDLE);
     render_complete_semaphores.resize(vk_context.swapchain_images.size(), VK_NULL_HANDLE);
@@ -122,6 +158,15 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
 
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
 
+    camera_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+    camera_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_buffer(&vk_context, sizeof(CameraData) * 2, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &camera_buffers[i], &camera_buffer_memories[i]);
+    }
+
+    camera.position = glm::vec3(0.0f, 0.0f, 5.0f);
+    camera.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+
     MeshData mesh_data = generate_triangle_mesh_data();
     uint32_t mesh_buffers_handle = request_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, std::move(mesh_data));
     mesh_buffers_handles.push_back(mesh_buffers_handle);
@@ -153,11 +198,12 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     // SDL_Log("Delta time: %.6f ms (%.2f FPS)", delta_time * 1000, 1.0 / delta_time);
 
-    // wait for the fence
+    // ========== GPU 同步阶段 ==========
+    // wait for the fence - 等待上一帧 GPU 完成，确保可以安全使用该帧的资源
     VkResult result = vkWaitForFences(vk_context.device, 1, &fences[frame_index], VK_TRUE, UINT64_MAX);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(result);
     result = vkResetFences(vk_context.device, 1, &fences[frame_index]);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(result);
 
     // previous frame has been rendered, release the referenced mesh buffers
     for (uint32_t mesh_buffers_handle : frame_states[frame_index].mesh_buffers_handles) {
@@ -165,11 +211,63 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     }
     frame_states[frame_index].mesh_buffers_handles.clear();
 
+    // ========== CPU 逻辑阶段 ==========
+    // 在等待 fence 之后、记录命令缓冲区之前执行所有 CPU 逻辑
+    // 这样可以最大化 CPU-GPU 并行度，同时确保数据准备完成后再记录命令
+
+    // update scene camera
+    int w = 0, h = 0;
+    bool success = SDL_GetWindowSizeInPixels(window, &w, &h);
+    assert(success);
+
+    glm::mat4 view = compute_view_matrix(camera);
+    glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float) w / (float) h, 0.1f, 100.0f);
+
+    // Vulkan clip space has inverted y and half z
+    glm::mat4 clip = glm::mat4(
+        1.0f,  0.0f, 0.0f, 0.0f, // 1st column of clip matrix
+        0.0f, -1.0f, 0.0f, 0.0f,
+        0.0f,  0.0f, 0.5f, 0.0f,
+        0.0f,  0.0f, 0.5f, 1.0f
+    );
+
+    camera_data[0].view = view;
+    camera_data[0].projection = clip * projection;
+
+    void *p_data = nullptr;
+    vkMapMemory(vk_context.device, camera_buffer_memories[frame_index], 0, sizeof(CameraData) * 2, 0, &p_data);
+    memcpy(p_data, camera_data, sizeof(CameraData) * 2);
+    vkUnmapMemory(vk_context.device, camera_buffer_memories[frame_index]);
+
+    VkDescriptorBufferInfo buffer_infos[2] = {};
+    buffer_infos[0].buffer = camera_buffers[frame_index];
+    buffer_infos[0].offset = 0;
+    buffer_infos[0].range = sizeof(CameraData);
+    buffer_infos[1].buffer = camera_buffers[frame_index];
+    buffer_infos[1].offset = sizeof(CameraData);
+    buffer_infos[1].range = sizeof(CameraData);
+
+    VkWriteDescriptorSet write_descriptor_set = {};
+    write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write_descriptor_set.dstSet = descriptor_sets[frame_index];
+    write_descriptor_set.dstBinding = 0;
+    write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write_descriptor_set.descriptorCount = 2;
+    write_descriptor_set.pBufferInfo = buffer_infos;
+
+    vkUpdateDescriptorSets(vk_context.device, 1, &write_descriptor_set, 0, nullptr);
+
+    // Update game logic, physics, animations, etc.
+    // Process input events
+    // Update scene graph
+    // Prepare render data (uniforms, descriptors, etc.)
+
+    // ========== GPU 资源获取阶段 ==========
     // acquire the next image
     uint32_t image_index;
     VkSemaphore image_acquired_semaphore = semaphore_pool.acquire_semaphore(&vk_context);
     result = vkAcquireNextImageKHR(vk_context.device, vk_context.swapchain, UINT64_MAX, image_acquired_semaphore, VK_NULL_HANDLE, &image_index);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(result);
     if (image_acquired_semaphores[image_index] != VK_NULL_HANDLE) { semaphore_pool.return_semaphore(image_acquired_semaphores[image_index]); }
     image_acquired_semaphores[image_index] = image_acquired_semaphore;
 
@@ -179,7 +277,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     result = vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(result);
 
     VkClearValue clear_values[2] = {};
     // clear_values[0].color = {.float32 = {0.5f, 0.8f, 1.0f, 1.0f}}; // 轻松活泼的天空蓝色 (RGB: 128, 204, 255)
@@ -199,14 +297,34 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         pipeline_key.depth_write_enabled = true;
         pipeline_key.shaders_hash = hash_strings("triangle", "triangle");
         VkPipeline pipeline = get_pipeline(&vk_context, pipeline_key);
+        MeshBuffers mesh_buffers = mesh_buffers_registry.entries[mesh_buffers_handle].mesh_buffers;
+
+        // 1. Pipeline 状态（最稳定，必须先绑定，后续命令都依赖它）
         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+        // 2. 描述符集（依赖 pipeline layout，必须在 pipeline 之后）
+        vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_context.pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
+
+        // 3. 动态状态（可以在 pipeline 绑定后设置，按使用频率和逻辑分组）
         set_viewport(command_buffer, 0, 0, app_state->width, app_state->height);
         set_scissor(command_buffer, 0, 0, app_state->width, app_state->height);
+        vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_BACK_BIT);
+
+        // 4. 资源绑定（顶点和索引缓冲区，绘制数据）
         VkDeviceSize offsets[] = {0};
-        MeshBuffers mesh_buffers = mesh_buffers_registry.entries[mesh_buffers_handle].mesh_buffers;
         vkCmdBindVertexBuffers(command_buffer, 0, 1, &mesh_buffers.vertex_buffer, offsets);
         if (mesh_buffers.index_count > 0) {
             vkCmdBindIndexBuffer(command_buffer, mesh_buffers.index_buffer, 0, mesh_buffers.index_type);
+        }
+
+        // 5. Push Constants（最后设置，因为可能频繁变化，放在绘制前）
+        PushConstants push_constants = {};
+        push_constants.model = glm::mat4(1.0f);
+        push_constants.camera_index = 0;
+        vkCmdPushConstants(command_buffer, vk_context.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &push_constants);
+
+        // 6. 绘制调用（最后执行）
+        if (mesh_buffers.index_count > 0) {
             vkCmdDrawIndexed(command_buffer, mesh_buffers.index_count, 1, 0, 0, 0);
         } else {
             vkCmdDraw(command_buffer, mesh_buffers.vertex_count, 1, 0, 0);
@@ -262,7 +380,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = &render_complete_semaphore;
     result = vkQueueSubmit(vk_context.queue, 1, &submit_info, fences[frame_index]);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(result);
     if (render_complete_semaphores[image_index] != VK_NULL_HANDLE) { semaphore_pool.return_semaphore(render_complete_semaphores[image_index]); }
     render_complete_semaphores[image_index] = render_complete_semaphore;
 
@@ -275,7 +393,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     present_info.pSwapchains = &vk_context.swapchain;
     present_info.pImageIndices = &image_index;
     result = vkQueuePresentKHR(vk_context.queue, &present_info);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(result);
 
     // const char *message = "Hello World!";
     // int w = 0, h = 0;
@@ -304,6 +422,12 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
 {
     vkDeviceWaitIdle(vk_context.device);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkDestroyBuffer(vk_context.device, camera_buffers[i], nullptr);
+        vkFreeMemory(vk_context.device, camera_buffer_memories[i], nullptr);
+    }
+    camera_buffers.clear();
+    camera_buffer_memories.clear();
     for (FrameState &frame_state : frame_states) {
         for (uint32_t mesh_buffers_handle : frame_state.mesh_buffers_handles) {
             decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
@@ -346,6 +470,14 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     }
     render_complete_semaphores.clear();
     semaphore_pool.cleanup(&vk_context);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkFreeDescriptorSets(vk_context.device, descriptor_pools[i], 1, &descriptor_sets[i]);
+    }
+    descriptor_sets.clear();
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkDestroyDescriptorPool(vk_context.device, descriptor_pools[i], nullptr);
+    }
+    descriptor_pools.clear();
     cleanup_vulkan(&vk_context);
     SDL_DestroyWindow(window);
     stop_task_system(&task_system);

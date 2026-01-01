@@ -10,12 +10,20 @@
 #define LOAD_INSTANCE_PROC_ADDR(instance, name) (PFN_ ## name) vkGetInstanceProcAddr(instance, #name);
 #define LOAD_DEVICE_PROC_ADDR(device, name) (PFN_ ## name) vkGetDeviceProcAddr(device, #name);
 
+#define VK_CHECK(result) do { \
+    if (VkResult vk_result = (result); vk_result != VK_SUCCESS) { \
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "error code %d, at %s:%d", vk_result, __FILE__, __LINE__); \
+        assert(vk_result == VK_SUCCESS); \
+    } \
+} while(0)
+
 struct Vertex {
     float position[3];
 };
 
 struct PushConstants {
     glm::mat4 model;
+    uint32_t camera_index;
 };
 
 struct PipelineKey {
@@ -60,6 +68,9 @@ struct VkContext {
     VkDescriptorSetLayout descriptor_set_layout;
     VkPipelineLayout pipeline_layout;
     std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelines;
+
+    // 动态加载的函数指针
+    PFN_vkCmdSetCullMode vkCmdSetCullMode;
 };
 
 void create_vulkan_instance(VkContext *context);
@@ -84,13 +95,15 @@ void get_memory_type_index(VkContext *context, const VkMemoryRequirements &memor
 
 void allocate_memory(VkContext *context, VkDeviceSize size, uint32_t memory_type_index, VkDeviceMemory *memory);
 
+void allocate_descriptor_set(VkContext *context, VkDescriptorPool descriptor_pool, VkDescriptorSet *descriptor_set);
+
 void create_image(VkContext *context, VkFormat format, uint32_t width, uint32_t height, VkImageUsageFlags usage, VkImage *image, VkDeviceMemory *image_memory);
 
 void create_image_view(VkContext *context, VkImage image, VkFormat format, VkImageAspectFlags aspect_mask, VkImageView *image_view);
 
 void create_framebuffer(VkContext *context, VkRenderPass render_pass, uint32_t attachment_count, VkImageView *attachments, uint32_t width, uint32_t height, VkFramebuffer *framebuffer);
 
-void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer);
+void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_memory);
 
 void create_descriptor_set_layout(VkContext *context);
 
