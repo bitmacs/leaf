@@ -18,6 +18,7 @@
 #include "vk.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_vulkan.h>
 #include <unordered_set>
 
 #define MAX_FRAMES_IN_FLIGHT 2
@@ -39,6 +40,8 @@ struct AppState {
 static TaskSystem task_system = {};
 static MeshBuffersRegistry mesh_buffers_registry = {};
 static SDL_Window *window = NULL;
+static bool window_has_focus = true; // 窗口焦点状态
+static bool need_recreate_surface = false; // 是否需要重新创建 surface
 
 static VkContext vk_context = {};
 static uint64_t last_frame_time = 0;
@@ -89,6 +92,63 @@ static void create_descriptor_pools(VkContext *context) {
     }
 }
 
+static void create_framebuffers(AppState *app_state) {
+    color_images.resize(MAX_FRAMES_IN_FLIGHT);
+    depth_images.resize(MAX_FRAMES_IN_FLIGHT);
+    color_image_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    depth_image_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    color_image_views.resize(MAX_FRAMES_IN_FLIGHT);
+    depth_image_views.resize(MAX_FRAMES_IN_FLIGHT);
+    framebuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_image(&vk_context, vk_context.surface_format, app_state->width, app_state->height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &color_images[i], &color_image_memories[i]);
+        create_image_view(&vk_context, color_images[i], vk_context.surface_format, VK_IMAGE_ASPECT_COLOR_BIT, &color_image_views[i]);
+
+        create_image(&vk_context, vk_context.depth_image_format, app_state->width, app_state->height, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &depth_images[i], &depth_image_memories[i]);
+        create_image_view(&vk_context, depth_images[i], vk_context.depth_image_format, VK_IMAGE_ASPECT_DEPTH_BIT, &depth_image_views[i]);
+
+        VkImageView attachments[] = {color_image_views[i], depth_image_views[i]};
+        create_framebuffer(&vk_context, vk_context.render_pass, std::size(attachments), attachments, app_state->width, app_state->height, &framebuffers[i]);
+    }
+}
+
+static void destroy_framebuffers() {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkDestroyFramebuffer(vk_context.device, framebuffers[i], nullptr);
+        vkDestroyImageView(vk_context.device, color_image_views[i], nullptr);
+        vkDestroyImageView(vk_context.device, depth_image_views[i], nullptr);
+        vkDestroyImage(vk_context.device, color_images[i], nullptr);
+        vkDestroyImage(vk_context.device, depth_images[i], nullptr);
+        vkFreeMemory(vk_context.device, color_image_memories[i], nullptr);
+        vkFreeMemory(vk_context.device, depth_image_memories[i], nullptr);
+    }
+    framebuffers.clear();
+    color_image_views.clear();
+    depth_image_views.clear();
+    color_images.clear();
+    depth_images.clear();
+    color_image_memories.clear();
+    depth_image_memories.clear();
+}
+
+static void app_resize(AppState *app_state) {
+    vkDeviceWaitIdle(vk_context.device);
+    for (FrameState &frame_state : frame_states) {
+        for (uint32_t mesh_buffers_handle : frame_state.mesh_buffers_handles) {
+            decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
+        }
+        frame_state.mesh_buffers_handles.clear();
+    }
+    frame_states.clear();
+    destroy_framebuffers();
+    vkDestroySwapchainKHR(vk_context.device, vk_context.swapchain, nullptr);
+    SDL_Vulkan_DestroySurface(vk_context.instance, vk_context.surface, nullptr);
+    create_vulkan_surface(&vk_context, window);
+    create_swapchain(&vk_context, app_state->width, app_state->height);
+    create_framebuffers(app_state);
+    frame_states.resize(MAX_FRAMES_IN_FLIGHT);
+}
+
 /* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
 {
@@ -137,24 +197,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     command_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     allocate_command_buffers(&vk_context, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
 
-    color_images.resize(MAX_FRAMES_IN_FLIGHT);
-    depth_images.resize(MAX_FRAMES_IN_FLIGHT);
-    color_image_memories.resize(MAX_FRAMES_IN_FLIGHT);
-    depth_image_memories.resize(MAX_FRAMES_IN_FLIGHT);
-    color_image_views.resize(MAX_FRAMES_IN_FLIGHT);
-    depth_image_views.resize(MAX_FRAMES_IN_FLIGHT);
-    framebuffers.resize(MAX_FRAMES_IN_FLIGHT);
-
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_image(&vk_context, vk_context.surface_format, app_state->width, app_state->height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &color_images[i], &color_image_memories[i]);
-        create_image_view(&vk_context, color_images[i], vk_context.surface_format, VK_IMAGE_ASPECT_COLOR_BIT, &color_image_views[i]);
-
-        create_image(&vk_context, vk_context.depth_image_format, app_state->width, app_state->height, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &depth_images[i], &depth_image_memories[i]);
-        create_image_view(&vk_context, depth_images[i], vk_context.depth_image_format, VK_IMAGE_ASPECT_DEPTH_BIT, &depth_image_views[i]);
-
-        VkImageView attachments[] = {color_image_views[i], depth_image_views[i]};
-        create_framebuffer(&vk_context, vk_context.render_pass, std::size(attachments), attachments, app_state->width, app_state->height, &framebuffers[i]);
-    }
+    create_framebuffers(app_state);
 
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
 
@@ -182,6 +225,18 @@ SDL_AppResult SDL_AppEvent(void *p_app_state, SDL_Event *event)
         event->type == SDL_EVENT_QUIT) {
         return SDL_APP_SUCCESS;  /* end the program, reporting success to the OS. */
     }
+    if (event->type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+        SDL_Log("SDL_AppEvent: SDL_EVENT_WINDOW_FOCUS_LOST");
+        window_has_focus = false;
+    } else if (event->type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
+        SDL_Log("SDL_AppEvent: SDL_EVENT_WINDOW_FOCUS_GAINED");
+        window_has_focus = true;
+    } else if (event->type == SDL_EVENT_WINDOW_RESTORED) {
+        SDL_Log("SDL_AppEvent: SDL_EVENT_WINDOW_RESTORED");
+        need_recreate_surface = true;
+    } else {
+        SDL_Log("SDL_AppEvent: 0x%x (%u)", event->type, event->type);
+    }
     return SDL_APP_CONTINUE;
 }
 
@@ -189,6 +244,16 @@ SDL_AppResult SDL_AppEvent(void *p_app_state, SDL_Event *event)
 SDL_AppResult SDL_AppIterate(void *p_app_state)
 {
     AppState *app_state = (AppState *) p_app_state;
+
+    if (!window_has_focus) {
+        return SDL_APP_CONTINUE;
+    }
+
+    if (need_recreate_surface) {
+        app_resize(app_state);
+        need_recreate_surface = false;
+        return SDL_APP_CONTINUE;
+    }
 
     // 计算 delta time（以秒为单位）
     Uint64 current_time = SDL_GetTicksNS();
@@ -439,22 +504,7 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
         decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
     }
     mesh_buffers_handles.clear();
-    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        vkDestroyFramebuffer(vk_context.device, framebuffers[i], nullptr);
-        vkDestroyImageView(vk_context.device, color_image_views[i], nullptr);
-        vkDestroyImageView(vk_context.device, depth_image_views[i], nullptr);
-        vkDestroyImage(vk_context.device, color_images[i], nullptr);
-        vkDestroyImage(vk_context.device, depth_images[i], nullptr);
-        vkFreeMemory(vk_context.device, color_image_memories[i], nullptr);
-        vkFreeMemory(vk_context.device, depth_image_memories[i], nullptr);
-    }
-    framebuffers.clear();
-    color_image_views.clear();
-    depth_image_views.clear();
-    color_images.clear();
-    depth_images.clear();
-    color_image_memories.clear();
-    depth_image_memories.clear();
+    destroy_framebuffers();
     vkFreeCommandBuffers(vk_context.device, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
     command_buffers.clear();
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
