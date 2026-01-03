@@ -4,14 +4,63 @@
 
 MeshData generate_triangle_mesh_data() {
     MeshData mesh_data;
+    // 等边三角形，中心在原点 (0, 0, 0)
+    // 三个顶点均匀分布在圆周上，角度间隔为 120 度
+    // 顶点1：顶部 (90°) = (0, r, 0)
+    // 顶点2：左下 (210°) = (-r*√3/2, -r/2, 0)
+    // 顶点3：右下 (330°) = (r*√3/2, -r/2, 0)
+    const float r = 0.5f;  // 中心到顶点的距离
+    const float sqrt3_half = 0.86602540378f;  // √3/2
     mesh_data.vertices = {
-        {{-0.5f, -0.5f, 0.0f}},
-        {{ 0.5f, -0.5f, 0.0f}},
-        {{ 0.0f,  0.5f, 0.0f}},
+        {{ 0.0f,        r, 0.0f}},  // 顶部
+        {{-r * sqrt3_half, -r * 0.5f, 0.0f}},  // 左下
+        {{ r * sqrt3_half, -r * 0.5f, 0.0f}},  // 右下
     };
     mesh_data.indices = {0, 1, 2};
     mesh_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     return mesh_data;
+}
+
+MeshData generate_plane_mesh_data(float size, uint32_t segments) {
+    MeshData mesh;
+
+    float step = size / (float) segments;
+    float half_size = size * 0.5f;
+
+    // 生成顶点
+    for (uint32_t z = 0; z <= segments; ++z) {
+        for (uint32_t x = 0; x <= segments; ++x) {
+            float x_pos = -half_size + x * step;
+            float z_pos = -half_size + z * step;
+
+            mesh.vertices.push_back({
+                {x_pos, 0.0f, z_pos}
+            });
+        }
+    }
+
+    // 生成索引
+    for (uint32_t z = 0; z < segments; ++z) {
+        for (uint32_t x = 0; x < segments; ++x) {
+            uint32_t top_left = z * (segments + 1) + x;
+            uint32_t top_right = top_left + 1;
+            uint32_t bottom_left = (z + 1) * (segments + 1) + x;
+            uint32_t bottom_right = bottom_left + 1;
+
+            // 第一个三角形
+            mesh.indices.push_back(top_left);
+            mesh.indices.push_back(bottom_left);
+            mesh.indices.push_back(top_right);
+
+            // 第二个三角形
+            mesh.indices.push_back(top_right);
+            mesh.indices.push_back(bottom_left);
+            mesh.indices.push_back(bottom_right);
+        }
+    }
+
+    mesh.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    return mesh;
 }
 
 uint32_t request_mesh_buffers(MeshBuffersRegistry *mesh_buffers_registry, TaskSystem *task_system, VkContext *context, MeshData &&mesh_data) {

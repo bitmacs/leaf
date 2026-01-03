@@ -10,7 +10,7 @@ layout (set = 0, binding = 0, std140) uniform CameraBuffer {
 
 layout (push_constant) uniform PushConstants {
     mat4 model;
-    // vec3 color;
+    vec3 color;
     uint camera_index;
 } push_constants;
 
@@ -20,7 +20,6 @@ layout (location = 0) out VS_OUT {
 
 void main() {
     // debugPrintfEXT("vertex index: %d", gl_VertexIndex);
-    // vs_out.color = instance.color;
     gl_Position =  cameras[push_constants.camera_index].projection * cameras[push_constants.camera_index].view * push_constants.model * vec4(position, 1.0);
-    vs_out.color = vec3(1.0, 0.0, 0.0);
+    vs_out.color = push_constants.color;
 }

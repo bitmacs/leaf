@@ -23,6 +23,7 @@ struct Vertex {
 
 struct PushConstants {
     glm::mat4 model;
+    alignas(16) glm::vec3 color;
     uint32_t camera_index;
 };
 

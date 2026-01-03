@@ -16,6 +16,7 @@
 #include "semaphores.h"
 #include "tasks.h"
 #include "vk.h"
+#include <glm/gtc/quaternion.hpp>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_vulkan.h>
@@ -30,6 +31,11 @@ struct FrameState {
 struct CameraData {
     glm::mat4 view;
     glm::mat4 projection;
+};
+
+struct Renderable {
+    uint32_t mesh_buffers_handle;
+    glm::vec3 color;
 };
 
 struct AppState {
@@ -66,10 +72,16 @@ static std::vector<VkFramebuffer> framebuffers;
 
 static std::vector<FrameState> frame_states = {}; // each in-flight frame has one frame state
 static Camera camera = {};
+static glm::vec3 camera_orbit_target = glm::vec3(0.0f, 0.0f, 0.0f);
+static float camera_orbit_radius = 5.0f;
+static bool is_dragging = false;
+static glm::vec2 prev_mouse_pos = glm::vec2(0.0f);
+static glm::vec2 mouse_pos = glm::vec2(0.0f);
+
 static CameraData camera_data[2] = {}; // [0] = scene camera, [1] = ui camera
 static std::vector<VkBuffer> camera_buffers = {}; // each in-flight frame has one camera buffer
 static std::vector<VkDeviceMemory> camera_buffer_memories = {}; // each in-flight frame has one camera buffer memory
-static std::vector<uint32_t> mesh_buffers_handles = {};
+static std::vector<Renderable> renderables = {};
 
 static void create_descriptor_pools(VkContext *context) {
     descriptor_pools.resize(MAX_FRAMES_IN_FLIGHT);
@@ -207,12 +219,16 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         create_buffer(&vk_context, sizeof(CameraData) * 2, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &camera_buffers[i], &camera_buffer_memories[i]);
     }
 
-    camera.position = glm::vec3(0.0f, 0.0f, 5.0f);
-    camera.orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-
-    MeshData mesh_data = generate_triangle_mesh_data();
-    uint32_t mesh_buffers_handle = request_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, std::move(mesh_data));
-    mesh_buffers_handles.push_back(mesh_buffers_handle);
+    {
+        MeshData mesh_data = generate_triangle_mesh_data();
+        uint32_t mesh_buffers_handle = request_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, std::move(mesh_data));
+        renderables.push_back({mesh_buffers_handle, glm::vec3(1.0f, 0.0f, 0.0f)});
+    }
+    {
+        MeshData mesh_data = generate_plane_mesh_data(2.0f, 2);
+        uint32_t mesh_buffers_handle = request_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, std::move(mesh_data));
+        renderables.push_back({mesh_buffers_handle, glm::vec3(0.0f, 1.0f, 0.0f)});
+    }
 
     last_frame_time = SDL_GetTicksNS(); // 初始化第一帧的时间
     return SDL_APP_CONTINUE;
@@ -226,14 +242,30 @@ SDL_AppResult SDL_AppEvent(void *p_app_state, SDL_Event *event)
         return SDL_APP_SUCCESS;  /* end the program, reporting success to the OS. */
     }
     if (event->type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-        SDL_Log("SDL_AppEvent: SDL_EVENT_WINDOW_FOCUS_LOST");
         window_has_focus = false;
     } else if (event->type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
-        SDL_Log("SDL_AppEvent: SDL_EVENT_WINDOW_FOCUS_GAINED");
         window_has_focus = true;
     } else if (event->type == SDL_EVENT_WINDOW_RESTORED) {
-        SDL_Log("SDL_AppEvent: SDL_EVENT_WINDOW_RESTORED");
         need_recreate_surface = true;
+    } else if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+        if (event->button.button == SDL_BUTTON_LEFT) {
+            // 只记录输入状态，不处理逻辑
+            is_dragging = true;
+            mouse_pos = glm::vec2(event->button.x, event->button.y);
+            prev_mouse_pos = mouse_pos;
+        }
+    } else if (event->type == SDL_EVENT_MOUSE_BUTTON_UP) {
+        if (event->button.button == SDL_BUTTON_LEFT) {
+            is_dragging = false;
+        }
+        // 检测双击：SDL 会自动检测双击，clicks 字段表示点击次数
+        if (event->button.clicks == 2) {
+            SDL_Log("SDL_AppEvent: 双击检测到！位置: (%.1f, %.1f)", event->button.x, event->button.y);
+            // 在这里处理双击逻辑
+            // 例如：切换相机模式、聚焦目标等
+        }
+    } else if (event->type == SDL_EVENT_MOUSE_MOTION) {
+        mouse_pos = glm::vec2(event->motion.x, event->motion.y);
     } else {
         SDL_Log("SDL_AppEvent: 0x%x (%u)", event->type, event->type);
     }
@@ -262,6 +294,50 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     last_frame_time = current_time;
 
     // SDL_Log("Delta time: %.6f ms (%.2f FPS)", delta_time * 1000, 1.0 / delta_time);
+
+    // cpu logic goes here
+    if (is_dragging) {
+        glm::vec2 mouse_delta = mouse_pos - prev_mouse_pos;
+        const float mouse_offset_threshold = 1;
+        if (glm::length(mouse_delta) > mouse_offset_threshold) {
+            const float rotation_sensitivity = 0.005f;  // 弧度/像素
+
+            // Yaw：绕世界 Y 轴旋转（水平旋转，左右转头）
+            if (float yaw_delta = -mouse_delta.x * rotation_sensitivity; fabsf(yaw_delta) > 0.0001f) {
+                glm::quat yaw_quat = glm::angleAxis(yaw_delta, glm::vec3(0.0f, 1.0f, 0.0f));
+                camera.orientation = glm::normalize(yaw_quat * camera.orientation);
+            }
+
+            // Pitch：绕相机本地 X 轴旋转（垂直旋转，上下抬头）
+            glm::mat3 rot_matrix = glm::mat3_cast(camera.orientation);
+            glm::vec3 local_x_axis = glm::normalize(rot_matrix[0]); // 右向量（本地 X 轴）
+
+            // 确保轴向量有效
+            if (glm::length(local_x_axis) < 0.001f) {
+                local_x_axis = glm::vec3(1.0f, 0.0f, 0.0f); // 回退到世界 X 轴
+            }
+
+            if (float pitch_delta = -mouse_delta.y * rotation_sensitivity; fabsf(pitch_delta) > 0.0001f) {
+                glm::quat pitch_quat = glm::angleAxis(pitch_delta, local_x_axis);
+                camera.orientation = glm::normalize(pitch_quat * camera.orientation);
+            }
+        }
+    }
+
+    glm::mat3 rot_matrix = glm::mat3_cast(camera.orientation);
+    glm::vec3 forward = -rot_matrix[2];  // Z 轴的反方向（相机朝向）
+
+    // 确保 forward 向量有效
+    if (float forward_length = glm::length(forward); forward_length < 0.001f) {
+        // 如果 forward 无效，使用默认方向
+        forward = glm::normalize(glm::vec3(0.0f, 0.0f, 1.0f));
+    } else {
+        forward = glm::normalize(forward);
+    }
+
+    camera.position = camera_orbit_target - forward * camera_orbit_radius;
+
+    prev_mouse_pos = mouse_pos;
 
     // ========== GPU 同步阶段 ==========
     // wait for the fence - 等待上一帧 GPU 完成，确保可以安全使用该帧的资源
@@ -346,14 +422,15 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     VkClearValue clear_values[2] = {};
     // clear_values[0].color = {.float32 = {0.5f, 0.8f, 1.0f, 1.0f}}; // 轻松活泼的天空蓝色 (RGB: 128, 204, 255)
-    clear_values[0].color = {.float32 = {0.5f, 1.0f, 0.8f}}; // 薄荷绿
+    // clear_values[0].color = {.float32 = {0.5f, 1.0f, 0.8f}}; // 薄荷绿
+    clear_values[0].color = {.float32 = {0.98f, 0.92f, 0.95f, 1.0f}}; // 樱花粉 (RGB: 250, 235, 242)
     clear_values[1].depthStencil = {.depth = 1.0f, .stencil = 0};
     begin_render_pass(&vk_context, command_buffer, vk_context.render_pass, framebuffers[frame_index], app_state->width, app_state->height, 2, clear_values);
 
-    for (uint32_t mesh_buffers_handle : mesh_buffers_handles) {
-        if (!is_mesh_buffers_uploaded(&mesh_buffers_registry, mesh_buffers_handle)) { continue; } // skip if mesh buffers are not uploaded yet
-        frame_states[frame_index].mesh_buffers_handles.insert(mesh_buffers_handle);
-        increment_ref_mesh_buffers(&mesh_buffers_registry, mesh_buffers_handle);
+    for (const Renderable &renderable : renderables) {
+        if (!is_mesh_buffers_uploaded(&mesh_buffers_registry, renderable.mesh_buffers_handle)) { continue; } // skip if mesh buffers are not uploaded yet
+        frame_states[frame_index].mesh_buffers_handles.insert(renderable.mesh_buffers_handle);
+        increment_ref_mesh_buffers(&mesh_buffers_registry, renderable.mesh_buffers_handle);
 
         PipelineKey pipeline_key = {};
         pipeline_key.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -362,7 +439,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         pipeline_key.depth_write_enabled = true;
         pipeline_key.shaders_hash = hash_strings("triangle", "triangle");
         VkPipeline pipeline = get_pipeline(&vk_context, pipeline_key);
-        MeshBuffers mesh_buffers = mesh_buffers_registry.entries[mesh_buffers_handle].mesh_buffers;
+        MeshBuffers mesh_buffers = mesh_buffers_registry.entries[renderable.mesh_buffers_handle].mesh_buffers;
 
         // 1. Pipeline 状态（最稳定，必须先绑定，后续命令都依赖它）
         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -373,7 +450,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         // 3. 动态状态（可以在 pipeline 绑定后设置，按使用频率和逻辑分组）
         set_viewport(command_buffer, 0, 0, app_state->width, app_state->height);
         set_scissor(command_buffer, 0, 0, app_state->width, app_state->height);
-        vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_BACK_BIT);
+        vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_NONE);
 
         // 4. 资源绑定（顶点和索引缓冲区，绘制数据）
         VkDeviceSize offsets[] = {0};
@@ -385,6 +462,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         // 5. Push Constants（最后设置，因为可能频繁变化，放在绘制前）
         PushConstants push_constants = {};
         push_constants.model = glm::mat4(1.0f);
+        push_constants.color = renderable.color;
         push_constants.camera_index = 0;
         vkCmdPushConstants(command_buffer, vk_context.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &push_constants);
 
@@ -500,10 +578,10 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
         frame_state.mesh_buffers_handles.clear();
     }
     frame_states.clear();
-    for (uint32_t mesh_buffers_handle : mesh_buffers_handles) {
-        decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
+    for (const Renderable &renderable : renderables) {
+        decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, renderable.mesh_buffers_handle);
     }
-    mesh_buffers_handles.clear();
+    renderables.clear();
     destroy_framebuffers();
     vkFreeCommandBuffers(vk_context.device, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
     command_buffers.clear();
@@ -532,6 +610,6 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     SDL_DestroyWindow(window);
     stop_task_system(&task_system);
     SDL_Quit();
-    SDL_Log("see you");
+    SDL_Log("bye");
 }
 
