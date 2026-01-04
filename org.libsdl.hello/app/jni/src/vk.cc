@@ -878,6 +878,14 @@ void set_scissor(VkCommandBuffer command_buffer, uint32_t x, uint32_t y, uint32_
     vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 }
 
+void create_semaphore(VkContext *context, VkSemaphore *semaphore) {
+    VkSemaphoreCreateInfo semaphore_create_info = {};
+    semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semaphore_create_info.flags = VK_SEMAPHORE_TYPE_BINARY;
+    VkResult result = vkCreateSemaphore(context->device, &semaphore_create_info, nullptr, semaphore);
+    assert(result == VK_SUCCESS);
+}
+
 void cleanup_vulkan(VkContext *context) {
     for (const auto &[pipeline_key, pipeline]: context->pipelines) {
         vkDestroyPipeline(context->device, pipeline, nullptr);

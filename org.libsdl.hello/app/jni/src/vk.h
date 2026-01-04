@@ -133,4 +133,6 @@ void set_viewport(VkCommandBuffer command_buffer, uint32_t x, uint32_t y, uint32
 
 void set_scissor(VkCommandBuffer command_buffer, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 
+void create_semaphore(VkContext *context, VkSemaphore *semaphore);
+
 void cleanup_vulkan(VkContext *context);

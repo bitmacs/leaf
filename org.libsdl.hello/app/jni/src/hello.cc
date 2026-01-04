@@ -2,7 +2,6 @@
 #include "camera.h"
 #include "files.h"
 #include "geometries.h"
-#include "semaphores.h"
 #include "tasks.h"
 #include "vk.h"
 #include <glm/gtc/quaternion.hpp>
@@ -67,9 +66,8 @@ static std::vector<VkFence> fences = {}; // each in-flight frame has a fence
 static std::vector<VkCommandBuffer> command_buffers = {}; // each in-flight frame has one command buffer
 static std::vector<VkDescriptorPool> descriptor_pools = {}; // each in-flight frame has one descriptor pool
 static std::vector<VkDescriptorSet> descriptor_sets = {}; // each in-flight frame has one descriptor set
-static std::vector<VkSemaphore> image_acquired_semaphores = {}; // each swapchain image has one image acquired semaphore
+static std::vector<VkSemaphore> image_acquired_semaphores = {}; // each in-flight frame has one image acquired semaphore
 static std::vector<VkSemaphore> render_complete_semaphores = {}; // each swapchain image has one render complete semaphore
-static SemaphorePool semaphore_pool = {}; // currently used for image acquired semaphores and render complete semaphores of each swapchain image, each in-flight frame has one semaphore pool
 
 // 离屏渲染资源（每个 in-flight 帧一份）
 static std::vector<VkImage> depth_images;
@@ -244,8 +242,14 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         allocate_descriptor_set(&vk_context, descriptor_pools[i], &descriptor_sets[i]);
     }
 
-    image_acquired_semaphores.resize(vk_context.swapchain_images.size(), VK_NULL_HANDLE);
-    render_complete_semaphores.resize(vk_context.swapchain_images.size(), VK_NULL_HANDLE);
+    image_acquired_semaphores.resize(MAX_FRAMES_IN_FLIGHT);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_semaphore(&vk_context, &image_acquired_semaphores[i]);
+    }
+    render_complete_semaphores.resize(vk_context.swapchain_images.size());
+    for (uint32_t i = 0; i < vk_context.swapchain_images.size(); ++i) {
+        create_semaphore(&vk_context, &render_complete_semaphores[i]);
+    }
 
     fences.resize(MAX_FRAMES_IN_FLIGHT);
     VkFenceCreateInfo fence_create_info = {};
@@ -501,11 +505,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     // ========== GPU 资源获取阶段 ==========
     // acquire the next image
     uint32_t image_index;
-    VkSemaphore image_acquired_semaphore = semaphore_pool.acquire_semaphore(&vk_context);
-    result = vkAcquireNextImageKHR(vk_context.device, vk_context.swapchain, UINT64_MAX, image_acquired_semaphore, VK_NULL_HANDLE, &image_index);
+    result = vkAcquireNextImageKHR(vk_context.device, vk_context.swapchain, UINT64_MAX, image_acquired_semaphores[frame_index], VK_NULL_HANDLE, &image_index);
     VK_CHECK(result);
-    if (image_acquired_semaphores[image_index] != VK_NULL_HANDLE) { semaphore_pool.return_semaphore(image_acquired_semaphores[image_index]); }
-    image_acquired_semaphores[image_index] = image_acquired_semaphore;
 
     // record the command buffer
     VkCommandBuffer command_buffer = command_buffers[frame_index];
@@ -659,28 +660,25 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     vkEndCommandBuffer(command_buffer);
 
     // submit the command buffer
-    VkSemaphore render_complete_semaphore = semaphore_pool.acquire_semaphore(&vk_context);
     VkSubmitInfo submit_info = {};
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.waitSemaphoreCount = 1;
-    submit_info.pWaitSemaphores = &image_acquired_semaphore;
+    submit_info.pWaitSemaphores = &image_acquired_semaphores[frame_index];
     // vkAcquireNextImageKHR 的 semaphore 在图像可用时被 signal，通常发生在 COLOR_ATTACHMENT_OUTPUT_BIT 阶段
     VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
     submit_info.pWaitDstStageMask = wait_stages;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &command_buffers[frame_index];
     submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &render_complete_semaphore;
+    submit_info.pSignalSemaphores = &render_complete_semaphores[image_index];
     result = vkQueueSubmit(vk_context.queue, 1, &submit_info, fences[frame_index]);
     VK_CHECK(result);
-    if (render_complete_semaphores[image_index] != VK_NULL_HANDLE) { semaphore_pool.return_semaphore(render_complete_semaphores[image_index]); }
-    render_complete_semaphores[image_index] = render_complete_semaphore;
 
     // present the image
     VkPresentInfoKHR present_info = {};
     present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores = &render_complete_semaphore;
+    present_info.pWaitSemaphores = &render_complete_semaphores[image_index];
     present_info.swapchainCount = 1;
     present_info.pSwapchains = &vk_context.swapchain;
     present_info.pImageIndices = &image_index;
@@ -746,15 +744,14 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
         vkDestroyFence(vk_context.device, fences[i], nullptr);
     }
     fences.clear();
-    for (size_t i = 0; i < vk_context.swapchain_images.size(); ++i) {
-        if (image_acquired_semaphores[i] != VK_NULL_HANDLE) { semaphore_pool.return_semaphore(image_acquired_semaphores[i]); }
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkDestroySemaphore(vk_context.device, image_acquired_semaphores[i], nullptr);
     }
     image_acquired_semaphores.clear();
     for (size_t i = 0; i < vk_context.swapchain_images.size(); ++i) {
-        if (render_complete_semaphores[i] != VK_NULL_HANDLE) { semaphore_pool.return_semaphore(render_complete_semaphores[i]); }
+        vkDestroySemaphore(vk_context.device, render_complete_semaphores[i], nullptr);
     }
     render_complete_semaphores.clear();
-    semaphore_pool.cleanup(&vk_context);
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         vkFreeDescriptorSets(vk_context.device, descriptor_pools[i], 1, &descriptor_sets[i]);
     }
