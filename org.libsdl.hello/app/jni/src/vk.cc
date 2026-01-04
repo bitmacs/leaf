@@ -49,17 +49,18 @@ void create_vulkan_instance(VkContext *context) {
     }
 
     instance_extensions.push_back("VK_EXT_debug_utils");
+    instance_extensions.push_back("VK_KHR_get_physical_device_properties2");
     instance_layers.push_back("VK_LAYER_KHRONOS_validation");
 
-    // {
-    //     uint32_t extension_count = 0;
-    //     vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, nullptr);
-    //     std::vector<VkExtensionProperties> extensions(extension_count);
-    //     vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, extensions.data());
-    //     for (const auto &extension: extensions) {
-    //         SDL_Log("instance extension: %s", extension.extensionName);
-    //     }
-    // }
+    {
+        uint32_t extension_count = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, nullptr);
+        std::vector<VkExtensionProperties> extensions(extension_count);
+        vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, extensions.data());
+        for (const auto &extension: extensions) {
+            SDL_Log("instance extension: %s", extension.extensionName);
+        }
+    }
 
     // {
     //     uint32_t layer_count = 0;
@@ -174,16 +175,41 @@ void create_device(VkContext *context) {
     // vkGetPhysicalDeviceFeatures(context->physical_device, &features);
     // assert(features.vertexPipelineStoresAndAtomics == VK_TRUE && "vertex pipeline stores and atomics is not supported");
 
+    {
+        // query ray tracing pipeline properties
+        VkPhysicalDeviceRayTracingPipelinePropertiesKHR ray_tracing_properties = {};
+        ray_tracing_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+        ray_tracing_properties.pNext = nullptr;
+
+        // query acceleration structure properties
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR acceleration_structure_properties = {};
+        acceleration_structure_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+        acceleration_structure_properties.pNext = &ray_tracing_properties;
+
+        VkPhysicalDeviceProperties2 properties = {};
+        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR;
+        properties.pNext = &acceleration_structure_properties;
+
+        auto vkGetPhysicalDeviceProperties2KHR = LOAD_INSTANCE_PROC_ADDR(context->instance, vkGetPhysicalDeviceProperties2KHR);
+        vkGetPhysicalDeviceProperties2KHR(context->physical_device, &properties);
+        SDL_Log("ray tracing pipeline properties: max ray recursion depth: %d", ray_tracing_properties.maxRayRecursionDepth);
+        SDL_Log("acceleration structure properties: max instance count: %lu", acceleration_structure_properties.maxInstanceCount);
+    }
+
     std::vector<const char *> required_device_extensions;
     std::vector<const char *> device_layers; // TODO
 
     required_device_extensions.push_back("VK_KHR_swapchain");
+
+    required_device_extensions.push_back("VK_KHR_dynamic_rendering");
+    required_device_extensions.push_back("VK_KHR_dynamic_rendering_local_read");
+
     required_device_extensions.push_back("VK_KHR_shader_non_semantic_info");
     required_device_extensions.push_back("VK_KHR_deferred_host_operations");
     required_device_extensions.push_back("VK_KHR_acceleration_structure");
     required_device_extensions.push_back("VK_KHR_ray_query");
     required_device_extensions.push_back("VK_KHR_pipeline_library");
-    required_device_extensions.push_back("VK_KHR_ray_tracing_pipeline");
+    required_device_extensions.push_back("VK_KHR_ray_tracing_pipeline"); // use vkCmdTraceRaysKHR
     device_layers.push_back("VK_LAYER_KHRONOS_validation");
 
     {
@@ -192,6 +218,10 @@ void create_device(VkContext *context) {
 
         std::vector<VkExtensionProperties> extensions(extension_count);
         vkEnumerateDeviceExtensionProperties(context->physical_device, nullptr, &extension_count, extensions.data());
+
+        for (const auto &extension: extensions) {
+            SDL_Log("extension: %s", extension.extensionName);
+        }
 
         for (const auto &required_device_extension: required_device_extensions) {
             bool found = false;
@@ -400,7 +430,7 @@ void create_render_pass(VkContext *context) {
     depth_attachment.format = context->depth_image_format;
     depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
     depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -432,9 +462,43 @@ void create_render_pass(VkContext *context) {
     assert(result == VK_SUCCESS);
 }
 
+void create_picking_render_pass(VkContext *context) {
+    // a render pass with no color attachment and one depth attachment
+
+    VkAttachmentDescription depth_attachment = {};
+    depth_attachment.format = context->depth_image_format;
+    depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_attachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentDescription attachments[1] = {depth_attachment};
+
+    VkAttachmentReference depth_attachment_ref = {};
+    depth_attachment_ref.attachment = 0;
+    depth_attachment_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkSubpassDescription subpass = {};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.pDepthStencilAttachment = &depth_attachment_ref;
+
+    VkRenderPassCreateInfo render_pass_create_info = {};
+    render_pass_create_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    render_pass_create_info.attachmentCount = std::size(attachments);
+    render_pass_create_info.pAttachments = attachments;
+    render_pass_create_info.subpassCount = 1;
+    render_pass_create_info.pSubpasses = &subpass;
+    VkResult result = vkCreateRenderPass(context->device, &render_pass_create_info, nullptr, &context->picking_render_pass);
+    assert(result == VK_SUCCESS);
+}
+
 void create_pipelines(VkContext *context) {
     // shader 名称（不包含路径和扩展名），函数会自动添加 shaders/ 前缀和 .vert.spv/.frag.spv 后缀
     create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, true, true, context->render_pass, "triangle", "triangle");
+    create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, false, true, false, context->picking_render_pass, "picking", "picking");
 }
 
 void allocate_command_buffers(VkContext *context, uint32_t count, VkCommandBuffer *command_buffers) {
@@ -563,7 +627,8 @@ void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usa
 
 void create_descriptor_set_layout(VkContext *context) {
     VkDescriptorSetLayoutBinding bindings[] = {
-        {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2, VK_SHADER_STAGE_VERTEX_BIT, nullptr}, // camera array with 2 cameras
+        {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}, // camera
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // picking storage buffer
     };
 
     VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info = {};
@@ -576,7 +641,7 @@ void create_descriptor_set_layout(VkContext *context) {
 
 void create_pipeline_layout(VkContext *context, size_t push_constant_size) {
     VkPushConstantRange push_constant_range = {};
-    push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     push_constant_range.offset = 0;
     push_constant_range.size = push_constant_size;
 
@@ -758,7 +823,7 @@ void end_render_pass(VkContext *context, VkCommandBuffer command_buffer) {
     vkCmdEndRenderPass(command_buffer);
 }
 
-void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image, VkPipelineStageFlags src_stage_flags, VkPipelineStageFlags dst_stage_flags, VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout src_layout, VkImageLayout dst_layout) {
+void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image, VkImageAspectFlags aspect_mask, VkPipelineStageFlags src_stage_flags, VkPipelineStageFlags dst_stage_flags, VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout src_layout, VkImageLayout dst_layout) {
     VkImageMemoryBarrier image_barrier = {};
     image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     image_barrier.srcAccessMask = src_access_mask;
@@ -768,7 +833,7 @@ void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image
     image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     image_barrier.image = image;
-    image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    image_barrier.subresourceRange.aspectMask = aspect_mask;
     image_barrier.subresourceRange.baseMipLevel = 0;
     image_barrier.subresourceRange.levelCount = 1;
     image_barrier.subresourceRange.baseArrayLayer = 0;
@@ -820,6 +885,7 @@ void cleanup_vulkan(VkContext *context) {
     context->pipelines.clear();
     vkDestroyPipelineLayout(context->device, context->pipeline_layout, nullptr);
     vkDestroyDescriptorSetLayout(context->device, context->descriptor_set_layout, nullptr);
+    vkDestroyRenderPass(context->device, context->picking_render_pass, nullptr);
     vkDestroyRenderPass(context->device, context->render_pass, nullptr);
     vkDestroyCommandPool(context->device, context->command_pool, nullptr);
     for (const auto &image_view: context->swapchain_image_views) {

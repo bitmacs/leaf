@@ -1,14 +1,3 @@
-/*
-  Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
-
-  This software is provided 'as-is', without any express or implied
-  warranty.  In no event will the authors be held liable for any damages
-  arising from the use of this software.
-
-  Permission is granted to anyone to use this software for any purpose,
-  including commercial applications, and to alter it and redistribute it
-  freely.
-*/
 #define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
 #include "camera.h"
 #include "files.h"
@@ -23,6 +12,12 @@
 #include <unordered_set>
 
 #define MAX_FRAMES_IN_FLIGHT 2
+
+enum PickingState {
+    PICKING_STATE_NONE = 0,
+    PICKING_STATE_REQUESTED,
+    PICKING_STATE_SUBMITTED,
+};
 
 struct FrameState {
     std::unordered_set<uint32_t> geometry_handles; // keep track of which geometries are used in this frame
@@ -85,10 +80,16 @@ static std::vector<VkImageView> depth_image_views;
 static std::vector<VkImageView> color_image_views;
 static std::vector<VkFramebuffer> framebuffers;
 
+static std::vector<VkFramebuffer> picking_framebuffers; // each in-flight frame has one picking framebuffer
+static std::vector<VkBuffer> picking_storage_buffers = {}; // each in-flight frame has one picking storage buffer
+static std::vector<VkDeviceMemory> picking_storage_buffer_memories = {}; // each in-flight frame has one picking storage buffer memory
+
 static std::vector<FrameState> frame_states = {}; // each in-flight frame has one frame state
+static std::vector<PickingState> picking_states = {}; // each in-flight frame has one picking state
+
 static Camera camera = {};
 static glm::vec3 camera_orbit_target = glm::vec3(0.0f, 0.0f, 0.0f);
-static float camera_orbit_radius = 5.0f;
+static float camera_orbit_radius = 8.0f;
 static bool is_dragging = false;
 static glm::vec2 prev_mouse_pos = glm::vec2(0.0f);
 static glm::vec2 mouse_pos = glm::vec2(0.0f);
@@ -109,8 +110,8 @@ static void create_descriptor_pools(VkContext *context) {
     descriptor_pools.resize(MAX_FRAMES_IN_FLIGHT);
 
     VkDescriptorPoolSize descriptor_pool_sizes[] = {
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}, // camera buffer array (2 cameras)
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}, // camera
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, // picking storage buffer
     };
 
     VkDescriptorPoolCreateInfo descriptor_pool_create_info = {};
@@ -139,7 +140,7 @@ static void create_framebuffers(AppState *app_state) {
         create_image_view(&vk_context, color_images[i], vk_context.surface_format, VK_IMAGE_ASPECT_COLOR_BIT, &color_image_views[i]);
 
         create_image(&vk_context, vk_context.depth_image_format, app_state->width, app_state->height, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &depth_images[i], &depth_image_memories[i]);
-        create_image_view(&vk_context, depth_images[i], vk_context.depth_image_format, VK_IMAGE_ASPECT_DEPTH_BIT, &depth_image_views[i]);
+        create_image_view(&vk_context, depth_images[i], vk_context.depth_image_format, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, &depth_image_views[i]);
 
         VkImageView attachments[] = {color_image_views[i], depth_image_views[i]};
         create_framebuffer(&vk_context, vk_context.render_pass, std::size(attachments), attachments, app_state->width, app_state->height, &framebuffers[i]);
@@ -165,8 +166,23 @@ static void destroy_framebuffers() {
     depth_image_memories.clear();
 }
 
+static void create_picking_framebuffers(AppState *app_state) {
+    picking_framebuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_framebuffer(&vk_context, vk_context.picking_render_pass, 1, &depth_image_views[i], app_state->width, app_state->height, &picking_framebuffers[i]);
+    }
+}
+
+static void destroy_picking_framebuffers() {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkDestroyFramebuffer(vk_context.device, picking_framebuffers[i], nullptr);
+    }
+    picking_framebuffers.clear();
+}
+
 static void app_resize(AppState *app_state) {
     vkDeviceWaitIdle(vk_context.device);
+    picking_states.clear();
     for (FrameState &frame_state : frame_states) {
         for (uint32_t geometry_handle : frame_state.geometry_handles) {
             decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, geometry_handle);
@@ -174,13 +190,16 @@ static void app_resize(AppState *app_state) {
         frame_state.geometry_handles.clear();
     }
     frame_states.clear();
+    destroy_picking_framebuffers(); // picking framebuffer 引用了 depth image view，因此需要先 destroy
     destroy_framebuffers();
     vkDestroySwapchainKHR(vk_context.device, vk_context.swapchain, nullptr);
     SDL_Vulkan_DestroySurface(vk_context.instance, vk_context.surface, nullptr);
     create_vulkan_surface(&vk_context, window);
     create_swapchain(&vk_context, app_state->width, app_state->height);
     create_framebuffers(app_state);
+    create_picking_framebuffers(app_state);
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
+    picking_states.resize(MAX_FRAMES_IN_FLIGHT, PICKING_STATE_NONE);
     frame_index = 0; // reset frame index
 }
 
@@ -215,6 +234,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     choose_depth_format(&vk_context);
     create_command_pool(&vk_context);
     create_render_pass(&vk_context);
+    create_picking_render_pass(&vk_context);
     create_descriptor_set_layout(&vk_context);
     create_pipeline_layout(&vk_context, sizeof(PushConstants));
     create_pipelines(&vk_context);
@@ -240,8 +260,15 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     allocate_command_buffers(&vk_context, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
 
     create_framebuffers(app_state);
+    create_picking_framebuffers(app_state);
+    picking_storage_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+    picking_storage_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_buffer(&vk_context, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &picking_storage_buffers[i], &picking_storage_buffer_memories[i]);
+    }
 
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
+    picking_states.resize(MAX_FRAMES_IN_FLIGHT, PICKING_STATE_NONE);
 
     camera_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     camera_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
@@ -290,11 +317,10 @@ SDL_AppResult SDL_AppEvent(void *p_app_state, SDL_Event *event)
         if (event->button.button == SDL_BUTTON_LEFT) {
             is_dragging = false;
         }
-        // 检测双击：SDL 会自动检测双击，clicks 字段表示点击次数
+        mouse_pos = glm::vec2(event->button.x, event->button.y);
         if (event->button.clicks == 2) {
             SDL_Log("SDL_AppEvent: 双击检测到！位置: (%.1f, %.1f)", event->button.x, event->button.y);
-            // 在这里处理双击逻辑
-            // 例如：切换相机模式、聚焦目标等
+            picking_states[frame_index] = PICKING_STATE_REQUESTED;
         }
     } else if (event->type == SDL_EVENT_MOUSE_MOTION) {
         mouse_pos = glm::vec2(event->motion.x, event->motion.y);
@@ -332,7 +358,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         glm::vec2 mouse_delta = mouse_pos - prev_mouse_pos;
         const float mouse_offset_threshold = 1;
         if (glm::length(mouse_delta) > mouse_offset_threshold) {
-            const float rotation_sensitivity = 0.005f;  // 弧度/像素
+            const float rotation_sensitivity = 0.0025f;  // 弧度/像素
 
             // Yaw：绕世界 Y 轴旋转（水平旋转，左右转头）
             if (float yaw_delta = -mouse_delta.x * rotation_sensitivity; fabsf(yaw_delta) > 0.0001f) {
@@ -379,6 +405,15 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     VK_CHECK(result);
 
     // previous frame has been rendered
+    if (picking_states[frame_index] == PICKING_STATE_SUBMITTED) {
+        uint32_t picking_result;
+        void *p_data = nullptr;
+        vkMapMemory(vk_context.device, picking_storage_buffer_memories[frame_index], 0, sizeof(uint32_t), 0, &p_data);
+        picking_result = *(uint32_t *) p_data;
+        vkUnmapMemory(vk_context.device, picking_storage_buffer_memories[frame_index]);
+        SDL_Log("Picking result: %u", picking_result);
+        picking_states[frame_index] = PICKING_STATE_NONE;
+    }
     // release the referenced geometries
     for (uint32_t geometry_handle : frame_states[frame_index].geometry_handles) {
         decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, geometry_handle);
@@ -409,23 +444,45 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     memcpy(p_data, camera_data, sizeof(CameraData) * 2);
     vkUnmapMemory(vk_context.device, camera_buffer_memories[frame_index]);
 
-    VkDescriptorBufferInfo buffer_infos[2] = {};
-    buffer_infos[0].buffer = camera_buffers[frame_index];
-    buffer_infos[0].offset = 0;
-    buffer_infos[0].range = sizeof(CameraData);
-    buffer_infos[1].buffer = camera_buffers[frame_index];
-    buffer_infos[1].offset = sizeof(CameraData);
-    buffer_infos[1].range = sizeof(CameraData);
+    {
+        // zero out the picking storage buffer
+        void *p_data = nullptr;
+        vkMapMemory(vk_context.device, picking_storage_buffer_memories[frame_index], 0, sizeof(uint32_t), 0, &p_data);
+        memset(p_data, 0, sizeof(uint32_t));
+        vkUnmapMemory(vk_context.device, picking_storage_buffer_memories[frame_index]);
+    }
 
-    VkWriteDescriptorSet write_descriptor_set = {};
-    write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write_descriptor_set.dstSet = descriptor_sets[frame_index];
-    write_descriptor_set.dstBinding = 0;
-    write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    write_descriptor_set.descriptorCount = 2;
-    write_descriptor_set.pBufferInfo = buffer_infos;
+    // update descriptor set
 
-    vkUpdateDescriptorSets(vk_context.device, 1, &write_descriptor_set, 0, nullptr);
+    VkDescriptorBufferInfo camera_buffer_info = {};
+    camera_buffer_info.buffer = camera_buffers[frame_index];
+    camera_buffer_info.offset = 0;
+    camera_buffer_info.range = sizeof(CameraData) * 2;
+
+    VkDescriptorBufferInfo picking_buffer_info = {};
+    picking_buffer_info.buffer = picking_storage_buffers[frame_index];
+    picking_buffer_info.offset = 0;
+    picking_buffer_info.range = sizeof(uint32_t);
+
+    VkWriteDescriptorSet write_descriptor_sets[2] = {};
+
+    // binding 0: camera uniform buffer
+    write_descriptor_sets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write_descriptor_sets[0].dstSet = descriptor_sets[frame_index];
+    write_descriptor_sets[0].dstBinding = 0;
+    write_descriptor_sets[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write_descriptor_sets[0].descriptorCount = 1;
+    write_descriptor_sets[0].pBufferInfo = &camera_buffer_info;
+
+    // binding 1: picking storage buffer
+    write_descriptor_sets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write_descriptor_sets[1].dstSet = descriptor_sets[frame_index];
+    write_descriptor_sets[1].dstBinding = 1;
+    write_descriptor_sets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write_descriptor_sets[1].descriptorCount = 1;
+    write_descriptor_sets[1].pBufferInfo = &picking_buffer_info;
+
+    vkUpdateDescriptorSets(vk_context.device, 2, write_descriptor_sets, 0, nullptr);
 
     // Update game logic, physics, animations, etc.
     // Process input events
@@ -498,7 +555,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         push_constants.model = renderable.model;
         push_constants.color = renderable.color;
         push_constants.camera_index = 0;
-        vkCmdPushConstants(command_buffer, vk_context.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &push_constants);
+        push_constants.entity_id = renderable.entity_id;
+        vkCmdPushConstants(command_buffer, vk_context.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &push_constants);
 
         // 6. 绘制调用（最后执行）
         if (geometry.index_count > 0) {
@@ -510,9 +568,64 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     end_render_pass(&vk_context, command_buffer);
 
+    if (picking_states[frame_index] == PICKING_STATE_REQUESTED) {
+        record_pipeline_image_barrier(command_buffer, depth_images[frame_index],
+                                      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+                                      VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                      VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+        begin_render_pass(&vk_context, command_buffer, vk_context.picking_render_pass, picking_framebuffers[frame_index], app_state->width, app_state->height, 0, nullptr);
+
+        for (const Renderable &renderable : renderables) {
+            PipelineKey pipeline_key = {};
+            pipeline_key.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            pipeline_key.polygon_mode = VK_POLYGON_MODE_FILL;
+            pipeline_key.depth_test_enabled = true;
+            pipeline_key.depth_write_enabled = false;
+            pipeline_key.shaders_hash = hash_strings("picking", "picking");
+            VkPipeline pipeline = get_pipeline(&vk_context, pipeline_key);
+            Geometry geometry = geometry_registry.entries[renderable.geometry_handle].geometry;
+
+            vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+            vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_context.pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
+
+            set_viewport(command_buffer, 0, 0, app_state->width, app_state->height);
+            set_scissor(command_buffer, mouse_pos.x, mouse_pos.y, 1, 1);
+            vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_NONE);
+
+            VkDeviceSize offsets[] = {0};
+            vkCmdBindVertexBuffers(command_buffer, 0, 1, &geometry.vertex_buffer, offsets);
+            if (geometry.index_count > 0) {
+                vkCmdBindIndexBuffer(command_buffer, geometry.index_buffer, 0, geometry.index_type);
+            }
+
+            PushConstants push_constants = {};
+            push_constants.model = renderable.model;
+            push_constants.color = renderable.color;
+            push_constants.camera_index = 0;
+            push_constants.entity_id = renderable.entity_id;
+            vkCmdPushConstants(command_buffer, vk_context.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &push_constants);
+
+            if (geometry.index_count > 0) {
+                vkCmdDrawIndexed(command_buffer, geometry.index_count, 1, 0, 0, 0);
+            } else {
+                vkCmdDraw(command_buffer, geometry.vertex_count, 1, 0, 0);
+            }
+        }
+
+        end_render_pass(&vk_context, command_buffer);
+        picking_states[frame_index] = PICKING_STATE_SUBMITTED;
+    }
+
     {
         // 转换 color image layout 为 TRANSFER_SRC_OPTIMAL
         record_pipeline_image_barrier(command_buffer, color_images[frame_index],
+                                      VK_IMAGE_ASPECT_COLOR_BIT,
                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                       VK_PIPELINE_STAGE_TRANSFER_BIT,
                                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -522,6 +635,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
         // 转换 swapchain image layout 为 TRANSFER_DST_OPTIMAL
         record_pipeline_image_barrier(command_buffer, vk_context.swapchain_images[image_index],
+                                      VK_IMAGE_ASPECT_COLOR_BIT,
                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                       VK_PIPELINE_STAGE_TRANSFER_BIT,
                                       0,
@@ -533,6 +647,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
         // 转换 swapchain image layout 为 PRESENT_SRC
         record_pipeline_image_barrier(command_buffer, vk_context.swapchain_images[image_index],
+                                      VK_IMAGE_ASPECT_COLOR_BIT,
                                       VK_PIPELINE_STAGE_TRANSFER_BIT,
                                       VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                                       VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -605,6 +720,7 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     }
     camera_buffers.clear();
     camera_buffer_memories.clear();
+    picking_states.clear();
     for (FrameState &frame_state : frame_states) {
         for (uint32_t geometry_handle : frame_state.geometry_handles) {
             decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, geometry_handle);
@@ -616,6 +732,13 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
         decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, entity.geometry_handle);
     }
     entities.clear();
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkDestroyBuffer(vk_context.device, picking_storage_buffers[i], nullptr);
+        vkFreeMemory(vk_context.device, picking_storage_buffer_memories[i], nullptr);
+    }
+    picking_storage_buffers.clear();
+    picking_storage_buffer_memories.clear();
+    destroy_picking_framebuffers();
     destroy_framebuffers();
     vkFreeCommandBuffers(vk_context.device, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
     command_buffers.clear();

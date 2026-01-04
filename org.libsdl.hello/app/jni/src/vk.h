@@ -25,6 +25,7 @@ struct PushConstants {
     glm::mat4 model;
     alignas(16) glm::vec3 color;
     uint32_t camera_index;
+    uint32_t entity_id;
 };
 
 struct PipelineKey {
@@ -66,6 +67,7 @@ struct VkContext {
     VkFormat depth_image_format;
     VkCommandPool command_pool;
     VkRenderPass render_pass;
+    VkRenderPass picking_render_pass;
     VkDescriptorSetLayout descriptor_set_layout;
     VkPipelineLayout pipeline_layout;
     std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelines;
@@ -89,6 +91,7 @@ void choose_depth_format(VkContext *context);
 void create_command_pool(VkContext *context);
 
 void create_render_pass(VkContext *context);
+void create_picking_render_pass(VkContext *context);
 
 void create_pipelines(VkContext *context);
 
@@ -122,7 +125,7 @@ void begin_render_pass(VkContext *context, VkCommandBuffer command_buffer, VkRen
 
 void end_render_pass(VkContext *context, VkCommandBuffer command_buffer);
 
-void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image, VkPipelineStageFlags src_stage_flags, VkPipelineStageFlags dst_stage_flags, VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout src_layout, VkImageLayout dst_layout);
+void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image, VkImageAspectFlags aspect_mask, VkPipelineStageFlags src_stage_flags, VkPipelineStageFlags dst_stage_flags, VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout src_layout, VkImageLayout dst_layout);
 
 void blit_image(VkCommandBuffer command_buffer, VkImage src_image, VkImageLayout src_image_layout, VkImage dst_image, VkImageLayout dst_image_layout, uint32_t width, uint32_t height);
 

@@ -1,5 +1,5 @@
-#version 440 core
-#extension GL_EXT_debug_printf : enable
+#version 460 core
+// #extension GL_EXT_debug_printf : enable
 
 #include "types.glsl"
 
@@ -16,12 +16,7 @@ layout (push_constant) uniform PushConstants {
     uint entity_id;
 } push_constants;
 
-layout (location = 0) out VS_OUT {
-    vec3 color;
-} vs_out;
-
 void main() {
-    // debugPrintfEXT("vertex index: %d", gl_VertexIndex);
+    // debugPrintfEXT("vertex index: %d, entity id: %d", gl_VertexIndex, push_constants.entity_id);
     gl_Position =  cameras[push_constants.camera_index].projection * cameras[push_constants.camera_index].view * push_constants.model * vec4(position, 1.0);
-    vs_out.color = push_constants.color;
 }
