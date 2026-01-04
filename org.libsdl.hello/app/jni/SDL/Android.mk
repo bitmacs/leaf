@@ -1,1 +1,1 @@
-/Users/zhuhongjian/leaf/external/SDL/Android.mk
+../../../../external/SDL/Android.mk

@@ -1,1 +1,1 @@
-/Users/zhuhongjian/leaf/external/SDL/README.md
+../../../../external/SDL/README.md
