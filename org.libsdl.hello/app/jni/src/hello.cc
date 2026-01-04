@@ -181,6 +181,7 @@ static void app_resize(AppState *app_state) {
     create_swapchain(&vk_context, app_state->width, app_state->height);
     create_framebuffers(app_state);
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
+    frame_index = 0; // reset frame index
 }
 
 /* This function runs once at startup. */
@@ -188,12 +189,19 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
 {
     start_task_system(&task_system);
 
-    bool init_succeed = SDL_Init(SDL_INIT_VIDEO);
-    assert(init_succeed);
+    bool succeed = SDL_Init(SDL_INIT_VIDEO);
+    assert(succeed);
 
     AppState *app_state = new AppState;
-    app_state->width = 800;
-    app_state->height = 600;
+
+    SDL_DisplayID primary_display = SDL_GetPrimaryDisplay();
+    assert(primary_display != 0);
+    SDL_Rect usable_bounds;
+    succeed = SDL_GetDisplayUsableBounds(primary_display, &usable_bounds);
+    assert(succeed);
+    app_state->width = (uint32_t) usable_bounds.w;
+    app_state->height = (uint32_t) usable_bounds.h;
+
     *pp_app_state = app_state;
 
     window = SDL_CreateWindow("gfx demo", app_state->width, app_state->height, SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
@@ -382,12 +390,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     // 这样可以最大化 CPU-GPU 并行度，同时确保数据准备完成后再记录命令
 
     // update scene camera
-    int w = 0, h = 0;
-    bool success = SDL_GetWindowSizeInPixels(window, &w, &h);
-    assert(success);
-
     glm::mat4 view = compute_view_matrix(camera);
-    glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float) w / (float) h, 0.1f, 100.0f);
+    glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float) app_state->width / (float) app_state->height, 0.1f, 100.0f);
 
     // Vulkan clip space has inverted y and half z
     glm::mat4 clip = glm::mat4(
