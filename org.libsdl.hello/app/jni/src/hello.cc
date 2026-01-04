@@ -12,7 +12,7 @@
 #define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
 #include "camera.h"
 #include "files.h"
-#include "meshes.h"
+#include "geometries.h"
 #include "semaphores.h"
 #include "tasks.h"
 #include "vk.h"
@@ -25,7 +25,7 @@
 #define MAX_FRAMES_IN_FLIGHT 2
 
 struct FrameState {
-    std::unordered_set<uint32_t> mesh_buffers_handles; // keep track of which mesh buffers are used in this frame
+    std::unordered_set<uint32_t> geometry_handles; // keep track of which geometries are used in this frame
 };
 
 struct CameraData {
@@ -33,8 +33,23 @@ struct CameraData {
     glm::mat4 projection;
 };
 
+struct Transform {
+    glm::vec3 position;
+    glm::quat orientation;
+    glm::vec3 scale;
+};
+
+struct Entity {
+    uint32_t entity_id;
+    uint32_t geometry_handle;
+    Transform transform;
+    glm::vec3 color;
+};
+
 struct Renderable {
-    uint32_t mesh_buffers_handle;
+    uint32_t entity_id;
+    uint32_t geometry_handle;
+    glm::mat4 model;
     glm::vec3 color;
 };
 
@@ -44,7 +59,7 @@ struct AppState {
 };
 
 static TaskSystem task_system = {};
-static MeshBuffersRegistry mesh_buffers_registry = {};
+static GeometryRegistry geometry_registry = {};
 static SDL_Window *window = NULL;
 static bool window_has_focus = true; // 窗口焦点状态
 static bool need_recreate_surface = false; // 是否需要重新创建 surface
@@ -81,7 +96,14 @@ static glm::vec2 mouse_pos = glm::vec2(0.0f);
 static CameraData camera_data[2] = {}; // [0] = scene camera, [1] = ui camera
 static std::vector<VkBuffer> camera_buffers = {}; // each in-flight frame has one camera buffer
 static std::vector<VkDeviceMemory> camera_buffer_memories = {}; // each in-flight frame has one camera buffer memory
-static std::vector<Renderable> renderables = {};
+static std::vector<Entity> entities = {};
+
+static glm::mat4 compute_model_matrix(const Transform &transform) {
+    glm::mat4 translation = glm::translate(glm::mat4(1.0f), transform.position);
+    glm::mat4 rotation = glm::mat4_cast(transform.orientation);
+    glm::mat4 scale = glm::scale(glm::mat4(1.0f), transform.scale);
+    return translation * rotation * scale;
+}
 
 static void create_descriptor_pools(VkContext *context) {
     descriptor_pools.resize(MAX_FRAMES_IN_FLIGHT);
@@ -146,10 +168,10 @@ static void destroy_framebuffers() {
 static void app_resize(AppState *app_state) {
     vkDeviceWaitIdle(vk_context.device);
     for (FrameState &frame_state : frame_states) {
-        for (uint32_t mesh_buffers_handle : frame_state.mesh_buffers_handles) {
-            decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
+        for (uint32_t geometry_handle : frame_state.geometry_handles) {
+            decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, geometry_handle);
         }
-        frame_state.mesh_buffers_handles.clear();
+        frame_state.geometry_handles.clear();
     }
     frame_states.clear();
     destroy_framebuffers();
@@ -220,14 +242,16 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     }
 
     {
-        MeshData mesh_data = generate_triangle_mesh_data();
-        uint32_t mesh_buffers_handle = request_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, std::move(mesh_data));
-        renderables.push_back({mesh_buffers_handle, glm::vec3(1.0f, 0.0f, 0.0f)});
+        GeometryData geometry_data = generate_triangle_geometry_data();
+        uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
+        Transform transform = {glm::vec3(0.0f, 0.5f, 0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
+        entities.push_back({1, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});
     }
     {
-        MeshData mesh_data = generate_plane_mesh_data(2.0f, 2);
-        uint32_t mesh_buffers_handle = request_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, std::move(mesh_data));
-        renderables.push_back({mesh_buffers_handle, glm::vec3(0.0f, 1.0f, 0.0f)});
+        GeometryData geometry_data = generate_plane_geometry_data(2.0f, 2);
+        uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
+        Transform transform = {glm::vec3(0.0f, 0.0f, 0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
+        entities.push_back({2, geometry_handle, transform, glm::vec3(0.0f, 1.0f, 0.0f)});
     }
 
     last_frame_time = SDL_GetTicksNS(); // 初始化第一帧的时间
@@ -346,11 +370,12 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     result = vkResetFences(vk_context.device, 1, &fences[frame_index]);
     VK_CHECK(result);
 
-    // previous frame has been rendered, release the referenced mesh buffers
-    for (uint32_t mesh_buffers_handle : frame_states[frame_index].mesh_buffers_handles) {
-        decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
+    // previous frame has been rendered
+    // release the referenced geometries
+    for (uint32_t geometry_handle : frame_states[frame_index].geometry_handles) {
+        decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, geometry_handle);
     }
-    frame_states[frame_index].mesh_buffers_handles.clear();
+    frame_states[frame_index].geometry_handles.clear();
 
     // ========== CPU 逻辑阶段 ==========
     // 在等待 fence 之后、记录命令缓冲区之前执行所有 CPU 逻辑
@@ -403,6 +428,15 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     // Update scene graph
     // Prepare render data (uniforms, descriptors, etc.)
 
+    // collect renderables
+    std::vector<Renderable> renderables = {};
+    for (const Entity &entity : entities) {
+        if (!is_geometry_uploaded(&geometry_registry, entity.geometry_handle)) { continue; } // skip if this geometry is not uploaded yet
+        frame_states[frame_index].geometry_handles.insert(entity.geometry_handle);
+        increment_ref_geometry(&geometry_registry, entity.geometry_handle);
+        renderables.push_back({entity.entity_id, entity.geometry_handle, compute_model_matrix(entity.transform), entity.color});
+    }
+
     // ========== GPU 资源获取阶段 ==========
     // acquire the next image
     uint32_t image_index;
@@ -428,10 +462,6 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     begin_render_pass(&vk_context, command_buffer, vk_context.render_pass, framebuffers[frame_index], app_state->width, app_state->height, 2, clear_values);
 
     for (const Renderable &renderable : renderables) {
-        if (!is_mesh_buffers_uploaded(&mesh_buffers_registry, renderable.mesh_buffers_handle)) { continue; } // skip if mesh buffers are not uploaded yet
-        frame_states[frame_index].mesh_buffers_handles.insert(renderable.mesh_buffers_handle);
-        increment_ref_mesh_buffers(&mesh_buffers_registry, renderable.mesh_buffers_handle);
-
         PipelineKey pipeline_key = {};
         pipeline_key.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
         pipeline_key.polygon_mode = VK_POLYGON_MODE_FILL;
@@ -439,7 +469,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         pipeline_key.depth_write_enabled = true;
         pipeline_key.shaders_hash = hash_strings("triangle", "triangle");
         VkPipeline pipeline = get_pipeline(&vk_context, pipeline_key);
-        MeshBuffers mesh_buffers = mesh_buffers_registry.entries[renderable.mesh_buffers_handle].mesh_buffers;
+        Geometry geometry = geometry_registry.entries[renderable.geometry_handle].geometry;
 
         // 1. Pipeline 状态（最稳定，必须先绑定，后续命令都依赖它）
         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -454,23 +484,23 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
         // 4. 资源绑定（顶点和索引缓冲区，绘制数据）
         VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(command_buffer, 0, 1, &mesh_buffers.vertex_buffer, offsets);
-        if (mesh_buffers.index_count > 0) {
-            vkCmdBindIndexBuffer(command_buffer, mesh_buffers.index_buffer, 0, mesh_buffers.index_type);
+        vkCmdBindVertexBuffers(command_buffer, 0, 1, &geometry.vertex_buffer, offsets);
+        if (geometry.index_count > 0) {
+            vkCmdBindIndexBuffer(command_buffer, geometry.index_buffer, 0, geometry.index_type);
         }
 
         // 5. Push Constants（最后设置，因为可能频繁变化，放在绘制前）
         PushConstants push_constants = {};
-        push_constants.model = glm::mat4(1.0f);
+        push_constants.model = renderable.model;
         push_constants.color = renderable.color;
         push_constants.camera_index = 0;
         vkCmdPushConstants(command_buffer, vk_context.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &push_constants);
 
         // 6. 绘制调用（最后执行）
-        if (mesh_buffers.index_count > 0) {
-            vkCmdDrawIndexed(command_buffer, mesh_buffers.index_count, 1, 0, 0, 0);
+        if (geometry.index_count > 0) {
+            vkCmdDrawIndexed(command_buffer, geometry.index_count, 1, 0, 0, 0);
         } else {
-            vkCmdDraw(command_buffer, mesh_buffers.vertex_count, 1, 0, 0);
+            vkCmdDraw(command_buffer, geometry.vertex_count, 1, 0, 0);
         }
     }
 
@@ -572,16 +602,16 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     camera_buffers.clear();
     camera_buffer_memories.clear();
     for (FrameState &frame_state : frame_states) {
-        for (uint32_t mesh_buffers_handle : frame_state.mesh_buffers_handles) {
-            decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, mesh_buffers_handle);
+        for (uint32_t geometry_handle : frame_state.geometry_handles) {
+            decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, geometry_handle);
         }
-        frame_state.mesh_buffers_handles.clear();
+        frame_state.geometry_handles.clear();
     }
     frame_states.clear();
-    for (const Renderable &renderable : renderables) {
-        decrement_ref_mesh_buffers(&mesh_buffers_registry, &task_system, &vk_context, renderable.mesh_buffers_handle);
+    for (const Entity &entity : entities) {
+        decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, entity.geometry_handle);
     }
-    renderables.clear();
+    entities.clear();
     destroy_framebuffers();
     vkFreeCommandBuffers(vk_context.device, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
     command_buffers.clear();

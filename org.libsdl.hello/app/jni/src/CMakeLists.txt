@@ -26,7 +26,7 @@ endif()
 add_library(main SHARED
     hello.cc
     vk.cc
-    meshes.cc
+    geometries.cc
     tasks.cc
     camera.cc
     files.cc
