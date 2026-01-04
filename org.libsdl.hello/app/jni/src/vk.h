@@ -84,6 +84,8 @@ void create_device(VkContext *context);
 
 void create_swapchain(VkContext *context, uint32_t width, uint32_t height);
 
+void choose_depth_format(VkContext *context);
+
 void create_command_pool(VkContext *context);
 
 void create_render_pass(VkContext *context);

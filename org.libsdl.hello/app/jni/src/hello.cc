@@ -204,7 +204,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     choose_physical_device(&vk_context);
     create_device(&vk_context);
     create_swapchain(&vk_context, app_state->width, app_state->height);
-    vk_context.depth_image_format = VK_FORMAT_D16_UNORM;
+    choose_depth_format(&vk_context);
     create_command_pool(&vk_context);
     create_render_pass(&vk_context);
     create_descriptor_set_layout(&vk_context);

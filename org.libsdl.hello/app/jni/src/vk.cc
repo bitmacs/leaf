@@ -352,6 +352,28 @@ void create_swapchain(VkContext *context, uint32_t width, uint32_t height) {
     }
 }
 
+void choose_depth_format(VkContext *context) {
+    // 按优先级排序的深度/模板格式列表
+    std::vector<VkFormat> candidate_formats = {
+        VK_FORMAT_D32_SFLOAT_S8_UINT,  // 32位深度（浮点）+ 8位模板（最佳精度）
+        VK_FORMAT_D24_UNORM_S8_UINT,   // 24位深度（归一化）+ 8位模板（最常用，广泛支持）
+        VK_FORMAT_D16_UNORM_S8_UINT,   // 16位深度 + 8位模板
+    };
+
+    for (VkFormat format : candidate_formats) {
+        VkFormatProperties format_properties;
+        vkGetPhysicalDeviceFormatProperties(context->physical_device, format, &format_properties);
+
+        // 检查格式是否支持作为深度/模板附件
+        if (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            context->depth_image_format = format;
+            SDL_Log("chosen depth format: %d", format);
+            return;
+        }
+    }
+    assert(false && "no supported depth format found");
+}
+
 void create_command_pool(VkContext *context) {
     VkCommandPoolCreateInfo command_pool_create_info = {};
     command_pool_create_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
