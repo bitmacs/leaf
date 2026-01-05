@@ -284,7 +284,7 @@ void create_device(VkContext *context) {
     assert(context->vkCmdSetCullMode && "vkCmdSetCullMode not available");
 }
 
-void create_swapchain(VkContext *context, uint32_t width, uint32_t height) {
+void create_swap_chain(VkContext *context, uint32_t width, uint32_t height) {
     // get supported formats
     uint32_t format_count = 0;
     VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(context->physical_device, context->surface, &format_count, nullptr);
@@ -346,7 +346,7 @@ void create_swapchain(VkContext *context, uint32_t width, uint32_t height) {
     swapchain_create_info.clipped = VK_TRUE;
     swapchain_create_info.oldSwapchain = VK_NULL_HANDLE;
 
-    result = vkCreateSwapchainKHR(context->device, &swapchain_create_info, nullptr, &context->swapchain);
+    result = vkCreateSwapchainKHR(context->device, &swapchain_create_info, nullptr, &context->swap_chain);
     assert(result == VK_SUCCESS);
 
     context->surface_format = surface_format;
@@ -354,18 +354,18 @@ void create_swapchain(VkContext *context, uint32_t width, uint32_t height) {
 
     // get swapchain images
     uint32_t image_count = 0;
-    vkGetSwapchainImagesKHR(context->device, context->swapchain, &image_count, nullptr);
+    vkGetSwapchainImagesKHR(context->device, context->swap_chain, &image_count, nullptr);
     assert(image_count > 0);
 
-    context->swapchain_images.resize(image_count);
-    vkGetSwapchainImagesKHR(context->device, context->swapchain, &image_count, context->swapchain_images.data());
+    context->swap_chain_images.resize(image_count);
+    vkGetSwapchainImagesKHR(context->device, context->swap_chain, &image_count, context->swap_chain_images.data());
 
     // create swapchain image views
-    context->swapchain_image_views.resize(image_count);
+    context->swap_chain_image_views.resize(image_count);
     for (uint32_t i = 0; i < image_count; ++i) {
         VkImageViewCreateInfo image_view_create_info = {};
         image_view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        image_view_create_info.image = context->swapchain_images[i];
+        image_view_create_info.image = context->swap_chain_images[i];
         image_view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
         image_view_create_info.format = surface_format;
         image_view_create_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
@@ -377,9 +377,18 @@ void create_swapchain(VkContext *context, uint32_t width, uint32_t height) {
         image_view_create_info.subresourceRange.levelCount = 1;
         image_view_create_info.subresourceRange.baseArrayLayer = 0;
         image_view_create_info.subresourceRange.layerCount = 1;
-        result = vkCreateImageView(context->device, &image_view_create_info, nullptr, &context->swapchain_image_views[i]);
+        result = vkCreateImageView(context->device, &image_view_create_info, nullptr, &context->swap_chain_image_views[i]);
         assert(result == VK_SUCCESS);
     }
+}
+
+void destroy_swap_chain(VkContext *context) {
+    for (const auto &image_view: context->swap_chain_image_views) {
+        vkDestroyImageView(context->device, image_view, nullptr);
+    }
+    context->swap_chain_image_views.clear();
+    context->swap_chain_images.clear();
+    vkDestroySwapchainKHR(context->device, context->swap_chain, nullptr);
 }
 
 void choose_depth_format(VkContext *context) {
@@ -896,12 +905,7 @@ void cleanup_vulkan(VkContext *context) {
     vkDestroyRenderPass(context->device, context->picking_render_pass, nullptr);
     vkDestroyRenderPass(context->device, context->render_pass, nullptr);
     vkDestroyCommandPool(context->device, context->command_pool, nullptr);
-    for (const auto &image_view: context->swapchain_image_views) {
-        vkDestroyImageView(context->device, image_view, nullptr);
-    }
-    context->swapchain_image_views.clear();
-    context->swapchain_images.clear();
-    vkDestroySwapchainKHR(context->device, context->swapchain, nullptr);
+    destroy_swap_chain(context);
     vkDestroyDevice(context->device, nullptr);
     SDL_Vulkan_DestroySurface(context->instance, context->surface, nullptr);
     auto vkDestroyDebugUtilsMessengerEXT = LOAD_INSTANCE_PROC_ADDR(context->instance, vkDestroyDebugUtilsMessengerEXT);

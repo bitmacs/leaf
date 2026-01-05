@@ -59,11 +59,11 @@ struct VkContext {
     uint32_t queue_family_index;
     VkDevice device;
     VkQueue queue;
-    VkSwapchainKHR swapchain;
+    VkSwapchainKHR swap_chain;
     VkFormat surface_format;
     VkColorSpaceKHR surface_color_space;
-    std::vector<VkImage> swapchain_images;
-    std::vector<VkImageView> swapchain_image_views;
+    std::vector<VkImage> swap_chain_images;
+    std::vector<VkImageView> swap_chain_image_views;
     VkFormat depth_image_format;
     VkCommandPool command_pool;
     VkRenderPass render_pass;
@@ -84,7 +84,8 @@ void choose_physical_device(VkContext *context);
 
 void create_device(VkContext *context);
 
-void create_swapchain(VkContext *context, uint32_t width, uint32_t height);
+void create_swap_chain(VkContext *context, uint32_t width, uint32_t height);
+void destroy_swap_chain(VkContext *context);
 
 void choose_depth_format(VkContext *context);
 

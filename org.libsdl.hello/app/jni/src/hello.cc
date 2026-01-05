@@ -190,10 +190,10 @@ static void app_resize(AppState *app_state) {
     frame_states.clear();
     destroy_picking_framebuffers(); // picking framebuffer 引用了 depth image view，因此需要先 destroy
     destroy_framebuffers();
-    vkDestroySwapchainKHR(vk_context.device, vk_context.swapchain, nullptr);
+    destroy_swap_chain(&vk_context);
     SDL_Vulkan_DestroySurface(vk_context.instance, vk_context.surface, nullptr);
     create_vulkan_surface(&vk_context, window);
-    create_swapchain(&vk_context, app_state->width, app_state->height);
+    create_swap_chain(&vk_context, app_state->width, app_state->height);
     create_framebuffers(app_state);
     create_picking_framebuffers(app_state);
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
@@ -228,7 +228,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     create_vulkan_surface(&vk_context, window);
     choose_physical_device(&vk_context);
     create_device(&vk_context);
-    create_swapchain(&vk_context, app_state->width, app_state->height);
+    create_swap_chain(&vk_context, app_state->width, app_state->height);
     choose_depth_format(&vk_context);
     create_command_pool(&vk_context);
     create_render_pass(&vk_context);
@@ -246,8 +246,8 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         create_semaphore(&vk_context, &image_acquired_semaphores[i]);
     }
-    render_complete_semaphores.resize(vk_context.swapchain_images.size());
-    for (uint32_t i = 0; i < vk_context.swapchain_images.size(); ++i) {
+    render_complete_semaphores.resize(vk_context.swap_chain_images.size());
+    for (uint32_t i = 0; i < vk_context.swap_chain_images.size(); ++i) {
         create_semaphore(&vk_context, &render_complete_semaphores[i]);
     }
 
@@ -505,7 +505,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     // ========== GPU 资源获取阶段 ==========
     // acquire the next image
     uint32_t image_index;
-    result = vkAcquireNextImageKHR(vk_context.device, vk_context.swapchain, UINT64_MAX, image_acquired_semaphores[frame_index], VK_NULL_HANDLE, &image_index);
+    result = vkAcquireNextImageKHR(vk_context.device, vk_context.swap_chain, UINT64_MAX, image_acquired_semaphores[frame_index], VK_NULL_HANDLE, &image_index);
     VK_CHECK(result);
 
     // record the command buffer
@@ -634,8 +634,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
-        // 转换 swapchain image layout 为 TRANSFER_DST_OPTIMAL
-        record_pipeline_image_barrier(command_buffer, vk_context.swapchain_images[image_index],
+        // 转换 swap chain image layout 为 TRANSFER_DST_OPTIMAL
+        record_pipeline_image_barrier(command_buffer, vk_context.swap_chain_images[image_index],
                                       VK_IMAGE_ASPECT_COLOR_BIT,
                                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                                       VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -646,8 +646,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
         blit_image(command_buffer, color_images[frame_index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk_context.swapchain_images[image_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, app_state->width, app_state->height);
 
-        // 转换 swapchain image layout 为 PRESENT_SRC
-        record_pipeline_image_barrier(command_buffer, vk_context.swapchain_images[image_index],
+        // 转换 swap chain image layout 为 PRESENT_SRC
+        record_pipeline_image_barrier(command_buffer, vk_context.swap_chain_images[image_index],
                                       VK_IMAGE_ASPECT_COLOR_BIT,
                                       VK_PIPELINE_STAGE_TRANSFER_BIT,
                                       VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -680,7 +680,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     present_info.waitSemaphoreCount = 1;
     present_info.pWaitSemaphores = &render_complete_semaphores[image_index];
     present_info.swapchainCount = 1;
-    present_info.pSwapchains = &vk_context.swapchain;
+    present_info.pSwapchains = &vk_context.swap_chain;
     present_info.pImageIndices = &image_index;
     result = vkQueuePresentKHR(vk_context.queue, &present_info);
     VK_CHECK(result);
@@ -748,7 +748,7 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
         vkDestroySemaphore(vk_context.device, image_acquired_semaphores[i], nullptr);
     }
     image_acquired_semaphores.clear();
-    for (size_t i = 0; i < vk_context.swapchain_images.size(); ++i) {
+    for (size_t i = 0; i < vk_context.swap_chain_images.size(); ++i) {
         vkDestroySemaphore(vk_context.device, render_complete_semaphores[i], nullptr);
     }
     render_complete_semaphores.clear();
