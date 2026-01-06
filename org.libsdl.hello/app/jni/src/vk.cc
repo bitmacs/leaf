@@ -734,7 +734,10 @@ void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology,
     depth_stencil_state_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depth_stencil_state_create_info.depthTestEnable = depth_test_enabled ? VK_TRUE : VK_FALSE;
     depth_stencil_state_create_info.depthWriteEnable = depth_write_enabled ? VK_TRUE : VK_FALSE;
-    depth_stencil_state_create_info.depthCompareOp = VK_COMPARE_OP_LESS;
+    // Picking shader 需要使用 LESS_OR_EQUAL，因为主渲染 pass 已经写入了最前面物体的深度值
+    // 如果使用 LESS，深度值等于深度缓冲区值的片段（最前面的物体）无法通过深度测试
+    // 当启用 early_fragment_tests 时，这会导致 fragment shader 不执行，entity_id 始终为 0
+    depth_stencil_state_create_info.depthCompareOp = (strcmp(fragment_shader_name, "picking") == 0) ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS;
 
     VkPipelineViewportStateCreateInfo viewport_state_create_info = {};
     viewport_state_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;

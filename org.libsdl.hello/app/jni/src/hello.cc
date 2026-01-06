@@ -47,6 +47,11 @@ struct Renderable {
     glm::vec3 color;
 };
 
+struct PickingResult {
+    uint32_t entity_id;
+    uint32_t min_depth_bits; // 用于跟踪最小深度值（以整数形式存储，便于 atomicMin）
+};
+
 struct AppState {
     uint32_t width;
     uint32_t height;
@@ -268,7 +273,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     picking_storage_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     picking_storage_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_buffer(&vk_context, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &picking_storage_buffers[i], &picking_storage_buffer_memories[i]);
+        create_buffer(&vk_context, sizeof(PickingResult), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &picking_storage_buffers[i], &picking_storage_buffer_memories[i]);
     }
 
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
@@ -410,12 +415,12 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     // previous frame has been rendered
     if (picking_states[frame_index] == PICKING_STATE_SUBMITTED) {
-        uint32_t picking_result;
         void *p_data = nullptr;
-        vkMapMemory(vk_context.device, picking_storage_buffer_memories[frame_index], 0, sizeof(uint32_t), 0, &p_data);
-        picking_result = *(uint32_t *) p_data;
+        vkMapMemory(vk_context.device, picking_storage_buffer_memories[frame_index], 0, sizeof(PickingResult), 0, &p_data);
+        PickingResult *picking_result = (PickingResult *) p_data;
+        float min_depth = (float) picking_result->min_depth_bits / 16777215.0f; // 转换回 [0, 1] 范围
         vkUnmapMemory(vk_context.device, picking_storage_buffer_memories[frame_index]);
-        SDL_Log("Picking result: %u", picking_result);
+        SDL_Log("Picking result: entity_id=%u, min_depth=%f (bits=0x%08X)", picking_result->entity_id, min_depth, picking_result->min_depth_bits);
         picking_states[frame_index] = PICKING_STATE_NONE;
     }
     // release the referenced geometries
@@ -449,44 +454,53 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     vkUnmapMemory(vk_context.device, camera_buffer_memories[frame_index]);
 
     {
-        // zero out the picking storage buffer
+        // 初始化 picking storage buffer
         void *p_data = nullptr;
-        vkMapMemory(vk_context.device, picking_storage_buffer_memories[frame_index], 0, sizeof(uint32_t), 0, &p_data);
-        memset(p_data, 0, sizeof(uint32_t));
+        vkMapMemory(vk_context.device, picking_storage_buffer_memories[frame_index], 0, sizeof(PickingResult), 0, &p_data);
+        PickingResult *picking_result = (PickingResult *) p_data;
+        picking_result->entity_id = 0;
+        picking_result->min_depth_bits = 0xFFFFFFFFu; // 最大深度值，表示最远
         vkUnmapMemory(vk_context.device, picking_storage_buffer_memories[frame_index]);
     }
 
     // update descriptor set
+    std::vector<VkWriteDescriptorSet> write_descriptor_sets = {};
 
-    VkDescriptorBufferInfo camera_buffer_info = {};
-    camera_buffer_info.buffer = camera_buffers[frame_index];
-    camera_buffer_info.offset = 0;
-    camera_buffer_info.range = sizeof(CameraData) * 2;
+    {
+        VkDescriptorBufferInfo buffer_info = {};
+        buffer_info.buffer = camera_buffers[frame_index];
+        buffer_info.offset = 0;
+        buffer_info.range = sizeof(CameraData) * 2;
 
-    VkDescriptorBufferInfo picking_buffer_info = {};
-    picking_buffer_info.buffer = picking_storage_buffers[frame_index];
-    picking_buffer_info.offset = 0;
-    picking_buffer_info.range = sizeof(uint32_t);
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 0;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pBufferInfo = &buffer_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
 
-    VkWriteDescriptorSet write_descriptor_sets[2] = {};
+    if (picking_states[frame_index] == PICKING_STATE_REQUESTED) {
+        VkDescriptorBufferInfo buffer_info = {};
+        buffer_info.buffer = picking_storage_buffers[frame_index];
+        buffer_info.offset = 0;
+        buffer_info.range = sizeof(PickingResult);
 
-    // binding 0: camera uniform buffer
-    write_descriptor_sets[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write_descriptor_sets[0].dstSet = descriptor_sets[frame_index];
-    write_descriptor_sets[0].dstBinding = 0;
-    write_descriptor_sets[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    write_descriptor_sets[0].descriptorCount = 1;
-    write_descriptor_sets[0].pBufferInfo = &camera_buffer_info;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 1;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pBufferInfo = &buffer_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
 
-    // binding 1: picking storage buffer
-    write_descriptor_sets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write_descriptor_sets[1].dstSet = descriptor_sets[frame_index];
-    write_descriptor_sets[1].dstBinding = 1;
-    write_descriptor_sets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write_descriptor_sets[1].descriptorCount = 1;
-    write_descriptor_sets[1].pBufferInfo = &picking_buffer_info;
+    build_top_level_acceleration_structure();
 
-    vkUpdateDescriptorSets(vk_context.device, 2, write_descriptor_sets, 0, nullptr);
+    vkUpdateDescriptorSets(vk_context.device, write_descriptor_sets.size(), write_descriptor_sets.data(), 0, nullptr);
 
     // Update game logic, physics, animations, etc.
     // Process input events
