@@ -66,14 +66,15 @@ struct VkContext {
     std::vector<VkImageView> swap_chain_image_views;
     VkFormat depth_image_format;
     VkCommandPool command_pool;
-    VkRenderPass render_pass;
-    VkRenderPass picking_render_pass;
     VkDescriptorSetLayout descriptor_set_layout;
     VkPipelineLayout pipeline_layout;
     std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelines;
 
     // 动态加载的函数指针
     PFN_vkCmdSetCullMode vkCmdSetCullMode;
+    PFN_vkCmdBeginRendering vkCmdBeginRendering;
+    PFN_vkCmdEndRendering vkCmdEndRendering;
+    PFN_vkSetDebugUtilsObjectNameEXT vkSetDebugUtilsObjectNameEXT;
 };
 
 void create_vulkan_instance(VkContext *context);
@@ -91,9 +92,6 @@ void choose_depth_format(VkContext *context);
 
 void create_command_pool(VkContext *context);
 
-void create_render_pass(VkContext *context);
-void create_picking_render_pass(VkContext *context);
-
 void create_pipelines(VkContext *context);
 
 void allocate_command_buffers(VkContext *context, uint32_t count, VkCommandBuffer *command_buffers);
@@ -106,11 +104,11 @@ void allocate_descriptor_set(VkContext *context, VkDescriptorPool descriptor_poo
 
 void create_image(VkContext *context, VkFormat format, uint32_t width, uint32_t height, VkImageUsageFlags usage, VkImage *image, VkDeviceMemory *image_memory);
 
-void create_image_view(VkContext *context, VkImage image, VkFormat format, VkImageAspectFlags aspect_mask, VkImageView *image_view);
-
-void create_framebuffer(VkContext *context, VkRenderPass render_pass, uint32_t attachment_count, VkImageView *attachments, uint32_t width, uint32_t height, VkFramebuffer *framebuffer);
+void create_image_view(VkContext *context, VkImage image, VkFormat format, VkImageAspectFlags aspect_mask, VkImageView *image_view, const char *name);
 
 void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_memory);
+
+void set_debug_object_name(VkContext *context, VkObjectType object_type, uint64_t object_handle, const char *name);
 
 void create_descriptor_set_layout(VkContext *context);
 
@@ -118,22 +116,22 @@ void create_pipeline_layout(VkContext *context, size_t push_constant_size);
 
 void create_shader_module(VkContext *context, const char *filepath, VkShaderModule *shader_module);
 
-void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology, VkPolygonMode polygon_mode, bool has_color_attachment, bool depth_test_enabled, bool depth_write_enabled, VkRenderPass render_pass, const char *vertex_shader_name, const char *fragment_shader_name);
+void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology, VkPolygonMode polygon_mode, bool depth_test_enabled, bool depth_write_enabled, VkFormat color_image_format, VkFormat depth_image_format, const char *vertex_shader_name, const char *fragment_shader_name);
 
 VkPipeline get_pipeline(VkContext *context, PipelineKey pipeline_key);
 
-void begin_render_pass(VkContext *context, VkCommandBuffer command_buffer, VkRenderPass render_pass, VkFramebuffer framebuffer, uint32_t width, uint32_t height, uint32_t clear_value_count, VkClearValue *clear_values);
-
-void end_render_pass(VkContext *context, VkCommandBuffer command_buffer);
-
 void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image, VkImageAspectFlags aspect_mask, VkPipelineStageFlags src_stage_flags, VkPipelineStageFlags dst_stage_flags, VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout src_layout, VkImageLayout dst_layout);
 
-void blit_image(VkCommandBuffer command_buffer, VkImage src_image, VkImageLayout src_image_layout, VkImage dst_image, VkImageLayout dst_image_layout, uint32_t width, uint32_t height);
+void blit_image(VkCommandBuffer command_buffer, VkImage src_image, VkImage dst_image, uint32_t src_width, uint32_t src_height, uint32_t dst_width, uint32_t dst_height);
 
 void set_viewport(VkCommandBuffer command_buffer, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 
 void set_scissor(VkCommandBuffer command_buffer, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 
 void create_semaphore(VkContext *context, VkSemaphore *semaphore);
+
+void begin_rendering(VkContext *context, VkCommandBuffer command_buffer, VkImageView color_image_view, VkClearColorValue *clear_color_value, VkImageView depth_image_view, VkClearDepthStencilValue *clear_depth_stencil_value, uint32_t width, uint32_t height);
+
+void end_rendering(VkContext *context, VkCommandBuffer command_buffer);
 
 void cleanup_vulkan(VkContext *context);

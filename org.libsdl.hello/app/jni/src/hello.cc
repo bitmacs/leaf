@@ -19,7 +19,7 @@ enum PickingState {
 };
 
 struct FrameState {
-    std::unordered_set<uint32_t> geometry_handles; // keep track of which geometries are used in this frame
+    std::unordered_set<uint32_t> geometry_handles; // keep track of which geometries are rendered in this frame
 };
 
 struct CameraData {
@@ -53,13 +53,16 @@ struct PickingResult {
 };
 
 struct AppState {
-    uint32_t width;
-    uint32_t height;
+    uint32_t width; // 窗口宽度（swap chain 尺寸）
+    uint32_t height; // 窗口高度（swap chain 尺寸）
+    uint32_t render_width; // 渲染宽度（窗口的 scale_factor 倍）
+    uint32_t render_height; // 渲染高度（窗口的 scale_factor 倍）
 };
 
 static TaskSystem task_system = {};
 static GeometryRegistry geometry_registry = {};
 static SDL_Window *window = NULL;
+static float scale_factor = 1.0f;
 static bool window_has_focus = true; // 窗口焦点状态
 static bool need_recreate_surface = false; // 是否需要重新创建 surface
 
@@ -81,9 +84,7 @@ static std::vector<VkDeviceMemory> depth_image_memories;
 static std::vector<VkDeviceMemory> color_image_memories;
 static std::vector<VkImageView> depth_image_views;
 static std::vector<VkImageView> color_image_views;
-static std::vector<VkFramebuffer> framebuffers;
 
-static std::vector<VkFramebuffer> picking_framebuffers; // each in-flight frame has one picking framebuffer
 static std::vector<VkBuffer> picking_storage_buffers = {}; // each in-flight frame has one picking storage buffer
 static std::vector<VkDeviceMemory> picking_storage_buffer_memories = {}; // each in-flight frame has one picking storage buffer memory
 
@@ -137,22 +138,20 @@ static void create_framebuffers(AppState *app_state) {
     depth_image_memories.resize(MAX_FRAMES_IN_FLIGHT);
     color_image_views.resize(MAX_FRAMES_IN_FLIGHT);
     depth_image_views.resize(MAX_FRAMES_IN_FLIGHT);
-    framebuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    char name[256];
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_image(&vk_context, vk_context.surface_format, app_state->width, app_state->height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &color_images[i], &color_image_memories[i]);
-        create_image_view(&vk_context, color_images[i], vk_context.surface_format, VK_IMAGE_ASPECT_COLOR_BIT, &color_image_views[i]);
+        create_image(&vk_context, vk_context.surface_format, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &color_images[i], &color_image_memories[i]);
+        snprintf(name, sizeof(name), "ColorImageView[%u]", i);
+        create_image_view(&vk_context, color_images[i], vk_context.surface_format, VK_IMAGE_ASPECT_COLOR_BIT, &color_image_views[i], name);
 
-        create_image(&vk_context, vk_context.depth_image_format, app_state->width, app_state->height, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &depth_images[i], &depth_image_memories[i]);
-        create_image_view(&vk_context, depth_images[i], vk_context.depth_image_format, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, &depth_image_views[i]);
-
-        VkImageView attachments[] = {color_image_views[i], depth_image_views[i]};
-        create_framebuffer(&vk_context, vk_context.render_pass, std::size(attachments), attachments, app_state->width, app_state->height, &framebuffers[i]);
+        create_image(&vk_context, vk_context.depth_image_format, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &depth_images[i], &depth_image_memories[i]);
+        snprintf(name, sizeof(name), "DepthImageView[%u]", i);
+        create_image_view(&vk_context, depth_images[i], vk_context.depth_image_format, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, &depth_image_views[i], name);
     }
 }
 
 static void destroy_framebuffers() {
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        vkDestroyFramebuffer(vk_context.device, framebuffers[i], nullptr);
         vkDestroyImageView(vk_context.device, color_image_views[i], nullptr);
         vkDestroyImageView(vk_context.device, depth_image_views[i], nullptr);
         vkDestroyImage(vk_context.device, color_images[i], nullptr);
@@ -160,7 +159,6 @@ static void destroy_framebuffers() {
         vkFreeMemory(vk_context.device, color_image_memories[i], nullptr);
         vkFreeMemory(vk_context.device, depth_image_memories[i], nullptr);
     }
-    framebuffers.clear();
     color_image_views.clear();
     depth_image_views.clear();
     color_images.clear();
@@ -169,38 +167,33 @@ static void destroy_framebuffers() {
     depth_image_memories.clear();
 }
 
-static void create_picking_framebuffers(AppState *app_state) {
-    picking_framebuffers.resize(MAX_FRAMES_IN_FLIGHT);
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_framebuffer(&vk_context, vk_context.picking_render_pass, 1, &depth_image_views[i], app_state->width, app_state->height, &picking_framebuffers[i]);
-    }
-}
-
-static void destroy_picking_framebuffers() {
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        vkDestroyFramebuffer(vk_context.device, picking_framebuffers[i], nullptr);
-    }
-    picking_framebuffers.clear();
-}
-
 static void app_resize(AppState *app_state) {
     vkDeviceWaitIdle(vk_context.device);
+
+    // 获取当前窗口大小
+    int width, height;
+    SDL_GetWindowSizeInPixels(window, &width, &height);
+    app_state->width = (uint32_t) width;
+    app_state->height = (uint32_t) height;
+
+    // 更新渲染尺寸（窗口的 scale_factor 倍）
+    app_state->render_width = (uint32_t) (app_state->width * scale_factor);
+    app_state->render_height = (uint32_t) (app_state->height * scale_factor);
+
     picking_states.clear();
     for (FrameState &frame_state : frame_states) {
         for (uint32_t geometry_handle : frame_state.geometry_handles) {
-            decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, geometry_handle);
+            decrement_geometry_ref(&geometry_registry, &task_system, &vk_context, geometry_handle);
         }
         frame_state.geometry_handles.clear();
     }
     frame_states.clear();
-    destroy_picking_framebuffers(); // picking framebuffer 引用了 depth image view，因此需要先 destroy
     destroy_framebuffers();
     destroy_swap_chain(&vk_context);
     SDL_Vulkan_DestroySurface(vk_context.instance, vk_context.surface, nullptr);
     create_vulkan_surface(&vk_context, window);
     create_swap_chain(&vk_context, app_state->width, app_state->height);
     create_framebuffers(app_state);
-    create_picking_framebuffers(app_state);
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
     picking_states.resize(MAX_FRAMES_IN_FLIGHT, PICKING_STATE_NONE);
     frame_index = 0; // reset frame index
@@ -224,6 +217,10 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     app_state->width = (uint32_t) usable_bounds.w;
     app_state->height = (uint32_t) usable_bounds.h;
 
+    // 渲染尺寸为屏幕尺寸的 scale_factor 倍
+    app_state->render_width = (uint32_t) (app_state->width * scale_factor);
+    app_state->render_height = (uint32_t) (app_state->height * scale_factor);
+
     *pp_app_state = app_state;
 
     window = SDL_CreateWindow("gfx demo", app_state->width, app_state->height, SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
@@ -236,8 +233,6 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     create_swap_chain(&vk_context, app_state->width, app_state->height);
     choose_depth_format(&vk_context);
     create_command_pool(&vk_context);
-    create_render_pass(&vk_context);
-    create_picking_render_pass(&vk_context);
     create_descriptor_set_layout(&vk_context);
     create_pipeline_layout(&vk_context, sizeof(PushConstants));
     create_pipelines(&vk_context);
@@ -269,7 +264,6 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     allocate_command_buffers(&vk_context, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
 
     create_framebuffers(app_state);
-    create_picking_framebuffers(app_state);
     picking_storage_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     picking_storage_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -425,7 +419,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     }
     // release the referenced geometries
     for (uint32_t geometry_handle : frame_states[frame_index].geometry_handles) {
-        decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, geometry_handle);
+        decrement_geometry_ref(&geometry_registry, &task_system, &vk_context, geometry_handle);
     }
     frame_states[frame_index].geometry_handles.clear();
 
@@ -435,7 +429,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     // update scene camera
     glm::mat4 view = compute_view_matrix(camera);
-    glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float) app_state->width / (float) app_state->height, 0.1f, 100.0f);
+    // 使用渲染尺寸的宽高比（保持比例）
+    glm::mat4 projection = glm::perspective(glm::radians(45.0f), (float) app_state->render_width / (float) app_state->render_height, 0.1f, 100.0f);
 
     // Vulkan clip space has inverted y and half z
     glm::mat4 clip = glm::mat4(
@@ -512,7 +507,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     for (const Entity &entity : entities) {
         if (!is_geometry_uploaded(&geometry_registry, entity.geometry_handle)) { continue; } // skip if this geometry is not uploaded yet
         frame_states[frame_index].geometry_handles.insert(entity.geometry_handle);
-        increment_ref_geometry(&geometry_registry, entity.geometry_handle);
+        increment_geometry_ref(&geometry_registry, entity.geometry_handle);
         renderables.push_back({entity.entity_id, entity.geometry_handle, compute_model_matrix(entity.transform), entity.color});
     }
 
@@ -530,12 +525,34 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     result = vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info);
     VK_CHECK(result);
 
-    VkClearValue clear_values[2] = {};
-    // clear_values[0].color = {.float32 = {0.5f, 0.8f, 1.0f, 1.0f}}; // 轻松活泼的天空蓝色 (RGB: 128, 204, 255)
-    // clear_values[0].color = {.float32 = {0.5f, 1.0f, 0.8f}}; // 薄荷绿
-    clear_values[0].color = {.float32 = {0.98f, 0.92f, 0.95f, 1.0f}}; // 樱花粉 (RGB: 250, 235, 242)
-    clear_values[1].depthStencil = {.depth = 1.0f, .stencil = 0};
-    begin_render_pass(&vk_context, command_buffer, vk_context.render_pass, framebuffers[frame_index], app_state->width, app_state->height, 2, clear_values);
+    // 转换 color image layout 为 COLOR_ATTACHMENT_OPTIMAL
+    // 使用 BOTTOM_OF_PIPE 作为 src stage，表示之前所有操作（包括上一帧的 TRANSFER）都已完成，适合复用的资源（即使当前帧是第一次使用，也表示“之前没有操作”），更符合 in-flight 帧的语义
+    record_pipeline_image_barrier(command_buffer, color_images[frame_index],
+                                  VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  0,
+                                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+    // 转换 depth image layout 为 DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    // 使用 BOTTOM_OF_PIPE 作为 src stage，表示之前所有操作（包括上一帧的深度测试）都已完成，适合复用的资源（即使当前帧是第一次使用，也表示“之前没有操作”），更符合 in-flight 帧的语义
+    record_pipeline_image_barrier(command_buffer, depth_images[frame_index],
+                                  VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                  VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                                  0,
+                                  VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+    // VkClearColorValue clear_color_value = {.float32 = {0.5f, 0.8f, 1.0f, 1.0f}}; // 轻松活泼的天空蓝色 (RGB: 128, 204, 255)
+    // VkClearColorValue clear_color_value = {.float32 = {0.5f, 1.0f, 0.8f}}; // 薄荷绿
+    VkClearColorValue clear_color_value = {.float32 = {0.98f, 0.92f, 0.95f, 1.0f}}; // 樱花粉 (RGB: 250, 235, 242)
+    VkClearDepthStencilValue clear_depth_stencil_value = {.depth = 1.0f, .stencil = 0};
+    // 使用渲染尺寸
+    begin_rendering(&vk_context, command_buffer, color_image_views[frame_index], &clear_color_value, depth_image_views[frame_index], &clear_depth_stencil_value, app_state->render_width, app_state->render_height);
 
     for (const Renderable &renderable : renderables) {
         PipelineKey pipeline_key = {};
@@ -554,8 +571,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_context.pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
 
         // 3. 动态状态（可以在 pipeline 绑定后设置，按使用频率和逻辑分组）
-        set_viewport(command_buffer, 0, 0, app_state->width, app_state->height);
-        set_scissor(command_buffer, 0, 0, app_state->width, app_state->height);
+        set_viewport(command_buffer, 0, 0, app_state->render_width, app_state->render_height);
+        set_scissor(command_buffer, 0, 0, app_state->render_width, app_state->render_height);
         vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_NONE);
 
         // 4. 资源绑定（顶点和索引缓冲区，绘制数据）
@@ -581,7 +598,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         }
     }
 
-    end_render_pass(&vk_context, command_buffer);
+    end_rendering(&vk_context, command_buffer);
 
     if (picking_states[frame_index] == PICKING_STATE_REQUESTED) {
         record_pipeline_image_barrier(command_buffer, depth_images[frame_index],
@@ -593,7 +610,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
                                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
-        begin_render_pass(&vk_context, command_buffer, vk_context.picking_render_pass, picking_framebuffers[frame_index], app_state->width, app_state->height, 0, nullptr);
+        begin_rendering(&vk_context, command_buffer, VK_NULL_HANDLE, nullptr, depth_image_views[frame_index], nullptr, app_state->render_width, app_state->render_height);
 
         for (const Renderable &renderable : renderables) {
             PipelineKey pipeline_key = {};
@@ -609,8 +626,11 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
             vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_context.pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
 
-            set_viewport(command_buffer, 0, 0, app_state->width, app_state->height);
-            set_scissor(command_buffer, mouse_pos.x, mouse_pos.y, 1, 1);
+            set_viewport(command_buffer, 0, 0, app_state->render_width, app_state->render_height);
+            // Picking 的 scissor 需要根据渲染尺寸缩放鼠标坐标
+            float scale_x = (float) app_state->render_width / (float) app_state->width;
+            float scale_y = (float) app_state->render_height / (float) app_state->height;
+            set_scissor(command_buffer, (uint32_t) (mouse_pos.x * scale_x), (uint32_t) (mouse_pos.y * scale_y), 1, 1);
             vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_NONE);
 
             VkDeviceSize offsets[] = {0};
@@ -633,7 +653,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
             }
         }
 
-        end_render_pass(&vk_context, command_buffer);
+        end_rendering(&vk_context, command_buffer);
         picking_states[frame_index] = PICKING_STATE_SUBMITTED;
     }
 
@@ -658,7 +678,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
                                       VK_IMAGE_LAYOUT_UNDEFINED, // acquire 后通常是 UNDEFINED
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-        blit_image(command_buffer, color_images[frame_index], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, vk_context.swapchain_images[image_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, app_state->width, app_state->height);
+        // Blit 时从渲染尺寸缩放到屏幕尺寸，保持宽高比并居中
+        blit_image(command_buffer, color_images[frame_index], vk_context.swap_chain_images[image_index], app_state->render_width, app_state->render_height, app_state->width, app_state->height);
 
         // 转换 swap chain image layout 为 PRESENT_SRC
         record_pipeline_image_barrier(command_buffer, vk_context.swap_chain_images[image_index],
@@ -735,13 +756,13 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     picking_states.clear();
     for (FrameState &frame_state : frame_states) {
         for (uint32_t geometry_handle : frame_state.geometry_handles) {
-            decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, geometry_handle);
+            decrement_geometry_ref(&geometry_registry, &task_system, &vk_context, geometry_handle);
         }
         frame_state.geometry_handles.clear();
     }
     frame_states.clear();
     for (const Entity &entity : entities) {
-        decrement_ref_geometry(&geometry_registry, &task_system, &vk_context, entity.geometry_handle);
+        decrement_geometry_ref(&geometry_registry, &task_system, &vk_context, entity.geometry_handle);
     }
     entities.clear();
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -750,7 +771,6 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     }
     picking_storage_buffers.clear();
     picking_storage_buffer_memories.clear();
-    destroy_picking_framebuffers();
     destroy_framebuffers();
     vkFreeCommandBuffers(vk_context.device, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
     command_buffers.clear();

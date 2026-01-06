@@ -261,8 +261,16 @@ void create_device(VkContext *context) {
     device_features.fillModeNonSolid = VK_TRUE;
     device_features.vertexPipelineStoresAndAtomics = VK_TRUE;
 
+    // 启用特性（pNext 链顺序：基础特性在前，独立特性在后）
+
+    VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering_features = {};
+    dynamic_rendering_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+    dynamic_rendering_features.dynamicRendering = VK_TRUE;
+    dynamic_rendering_features.pNext = nullptr;
+
     VkDeviceCreateInfo device_create_info = {};
     device_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    device_create_info.pNext = &dynamic_rendering_features; // 通过 pNext 链传递特性
     device_create_info.queueCreateInfoCount = 1;
     device_create_info.pQueueCreateInfos = &queue_create_info;
     device_create_info.enabledExtensionCount = required_device_extensions.size();
@@ -282,6 +290,13 @@ void create_device(VkContext *context) {
     // 加载动态函数（Vulkan 1.3 核心函数，但某些实现可能需要动态加载）
     context->vkCmdSetCullMode = LOAD_DEVICE_PROC_ADDR(context->device, vkCmdSetCullMode);
     assert(context->vkCmdSetCullMode && "vkCmdSetCullMode not available");
+    context->vkCmdBeginRendering = LOAD_DEVICE_PROC_ADDR(context->device, vkCmdBeginRendering);
+    assert(context->vkCmdBeginRendering && "vkCmdBeginRendering not available");
+    context->vkCmdEndRendering = LOAD_DEVICE_PROC_ADDR(context->device, vkCmdEndRendering);
+    assert(context->vkCmdEndRendering && "vkCmdEndRendering not available");
+    // 加载 Debug Utils 函数（用于资源命名）
+    context->vkSetDebugUtilsObjectNameEXT = LOAD_DEVICE_PROC_ADDR(context->device, vkSetDebugUtilsObjectNameEXT);
+    assert(context->vkSetDebugUtilsObjectNameEXT && "vkSetDebugUtilsObjectNameEXT not available");
 }
 
 void create_swap_chain(VkContext *context, uint32_t width, uint32_t height) {
@@ -326,33 +341,33 @@ void create_swap_chain(VkContext *context, uint32_t width, uint32_t height) {
     }
     assert(composite_alpha != VK_COMPOSITE_ALPHA_FLAG_BITS_MAX_ENUM_KHR && "no supported composite alpha mode found");
 
-    // 检查 surface 是否支持 TRANSFER_DST_BIT（用于 blit 到 swapchain）
+    // 检查 surface 是否支持 TRANSFER_DST_BIT（用于 blit 到 swap chain image）
     VkImageUsageFlags image_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     assert(surface_capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT && "surface does not support TRANSFER_DST_BIT");
     image_usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
-    VkSwapchainCreateInfoKHR swapchain_create_info = {};
-    swapchain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-    swapchain_create_info.surface = context->surface;
-    swapchain_create_info.minImageCount = min_image_count;
-    swapchain_create_info.imageFormat = surface_format;
-    swapchain_create_info.imageColorSpace = surface_color_space;
-    swapchain_create_info.imageExtent = {width, height};
-    swapchain_create_info.imageArrayLayers = 1;
-    swapchain_create_info.imageUsage = image_usage;
-    swapchain_create_info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-    swapchain_create_info.compositeAlpha = composite_alpha;
-    swapchain_create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
-    swapchain_create_info.clipped = VK_TRUE;
-    swapchain_create_info.oldSwapchain = VK_NULL_HANDLE;
+    VkSwapchainCreateInfoKHR swap_chain_create_info = {};
+    swap_chain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    swap_chain_create_info.surface = context->surface;
+    swap_chain_create_info.minImageCount = min_image_count;
+    swap_chain_create_info.imageFormat = surface_format;
+    swap_chain_create_info.imageColorSpace = surface_color_space;
+    swap_chain_create_info.imageExtent = {width, height};
+    swap_chain_create_info.imageArrayLayers = 1;
+    swap_chain_create_info.imageUsage = image_usage;
+    swap_chain_create_info.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    swap_chain_create_info.compositeAlpha = composite_alpha;
+    swap_chain_create_info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    swap_chain_create_info.clipped = VK_TRUE;
+    swap_chain_create_info.oldSwapchain = VK_NULL_HANDLE;
 
-    result = vkCreateSwapchainKHR(context->device, &swapchain_create_info, nullptr, &context->swap_chain);
+    result = vkCreateSwapchainKHR(context->device, &swap_chain_create_info, nullptr, &context->swap_chain);
     assert(result == VK_SUCCESS);
 
     context->surface_format = surface_format;
     context->surface_color_space = surface_color_space;
 
-    // get swapchain images
+    // get swap chain images
     uint32_t image_count = 0;
     vkGetSwapchainImagesKHR(context->device, context->swap_chain, &image_count, nullptr);
     assert(image_count > 0);
@@ -360,7 +375,7 @@ void create_swap_chain(VkContext *context, uint32_t width, uint32_t height) {
     context->swap_chain_images.resize(image_count);
     vkGetSwapchainImagesKHR(context->device, context->swap_chain, &image_count, context->swap_chain_images.data());
 
-    // create swapchain image views
+    // create swap chain image views
     context->swap_chain_image_views.resize(image_count);
     for (uint32_t i = 0; i < image_count; ++i) {
         VkImageViewCreateInfo image_view_create_info = {};
@@ -379,6 +394,10 @@ void create_swap_chain(VkContext *context, uint32_t width, uint32_t height) {
         image_view_create_info.subresourceRange.layerCount = 1;
         result = vkCreateImageView(context->device, &image_view_create_info, nullptr, &context->swap_chain_image_views[i]);
         assert(result == VK_SUCCESS);
+
+        char name[256];
+        snprintf(name, sizeof(name), "SwapChainImageView[%u]", i);
+        set_debug_object_name(context, VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t) context->swap_chain_image_views[i], name);
     }
 }
 
@@ -422,92 +441,10 @@ void create_command_pool(VkContext *context) {
     assert(result == VK_SUCCESS);
 }
 
-void create_render_pass(VkContext *context) {
-    // a render pass with one color attachment and one depth attachment
-
-    VkAttachmentDescription color_attachment = {};
-    color_attachment.format = context->surface_format;
-    color_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    color_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    color_attachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentDescription depth_attachment = {};
-    depth_attachment.format = context->depth_image_format;
-    depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depth_attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentDescription attachments[2] = {color_attachment, depth_attachment};
-
-    VkAttachmentReference color_attachment_ref = {};
-    color_attachment_ref.attachment = 0;
-    color_attachment_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentReference depth_attachment_ref = {};
-    depth_attachment_ref.attachment = 1;
-    depth_attachment_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass = {};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_attachment_ref;
-    subpass.pDepthStencilAttachment = &depth_attachment_ref;
-
-    VkRenderPassCreateInfo render_pass_create_info = {};
-    render_pass_create_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    render_pass_create_info.attachmentCount = std::size(attachments);
-    render_pass_create_info.pAttachments = attachments;
-    render_pass_create_info.subpassCount = 1;
-    render_pass_create_info.pSubpasses = &subpass;
-    VkResult result = vkCreateRenderPass(context->device, &render_pass_create_info, nullptr, &context->render_pass);
-    assert(result == VK_SUCCESS);
-}
-
-void create_picking_render_pass(VkContext *context) {
-    // a render pass with no color attachment and one depth attachment
-
-    VkAttachmentDescription depth_attachment = {};
-    depth_attachment.format = context->depth_image_format;
-    depth_attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depth_attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depth_attachment.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    depth_attachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkAttachmentDescription attachments[1] = {depth_attachment};
-
-    VkAttachmentReference depth_attachment_ref = {};
-    depth_attachment_ref.attachment = 0;
-    depth_attachment_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-    VkSubpassDescription subpass = {};
-    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.pDepthStencilAttachment = &depth_attachment_ref;
-
-    VkRenderPassCreateInfo render_pass_create_info = {};
-    render_pass_create_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    render_pass_create_info.attachmentCount = std::size(attachments);
-    render_pass_create_info.pAttachments = attachments;
-    render_pass_create_info.subpassCount = 1;
-    render_pass_create_info.pSubpasses = &subpass;
-    VkResult result = vkCreateRenderPass(context->device, &render_pass_create_info, nullptr, &context->picking_render_pass);
-    assert(result == VK_SUCCESS);
-}
-
 void create_pipelines(VkContext *context) {
     // shader 名称（不包含路径和扩展名），函数会自动添加 shaders/ 前缀和 .vert.spv/.frag.spv 后缀
-    create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, true, true, context->render_pass, "triangle", "triangle");
-    create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, false, true, false, context->picking_render_pass, "picking", "picking");
+    create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, true, context->surface_format, context->depth_image_format, "triangle", "triangle");
+    create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, false, VK_FORMAT_UNDEFINED, context->depth_image_format, "picking", "picking");
 }
 
 void allocate_command_buffers(VkContext *context, uint32_t count, VkCommandBuffer *command_buffers) {
@@ -551,7 +488,7 @@ void allocate_descriptor_set(VkContext *context, VkDescriptorPool descriptor_poo
     descriptor_set_allocate_info.descriptorSetCount = 1;
     descriptor_set_allocate_info.pSetLayouts = &context->descriptor_set_layout;
     VkResult result = vkAllocateDescriptorSets(context->device, &descriptor_set_allocate_info, descriptor_set);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(result);
 }
 
 void create_image(VkContext *context, VkFormat format, uint32_t width, uint32_t height, VkImageUsageFlags usage, VkImage *image, VkDeviceMemory *image_memory) {
@@ -568,7 +505,7 @@ void create_image(VkContext *context, VkFormat format, uint32_t width, uint32_t 
     image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkResult result = vkCreateImage(context->device, &image_create_info, nullptr, image);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(result);
 
     VkMemoryRequirements memory_requirements;
     vkGetImageMemoryRequirements(context->device, *image, &memory_requirements);
@@ -580,7 +517,7 @@ void create_image(VkContext *context, VkFormat format, uint32_t width, uint32_t 
     vkBindImageMemory(context->device, *image, *image_memory, 0);
 }
 
-void create_image_view(VkContext *context, VkImage image, VkFormat format, VkImageAspectFlags aspect_mask, VkImageView *image_view) {
+void create_image_view(VkContext *context, VkImage image, VkFormat format, VkImageAspectFlags aspect_mask, VkImageView *image_view, const char *name) {
     VkImageViewCreateInfo image_view_create_info = {};
     image_view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     image_view_create_info.image = image;
@@ -596,20 +533,10 @@ void create_image_view(VkContext *context, VkImage image, VkFormat format, VkIma
     image_view_create_info.subresourceRange.baseArrayLayer = 0;
     image_view_create_info.subresourceRange.layerCount = 1;
     VkResult result = vkCreateImageView(context->device, &image_view_create_info, nullptr, image_view);
-    assert(result == VK_SUCCESS);
-}
+    VK_CHECK(result);
 
-void create_framebuffer(VkContext *context, VkRenderPass render_pass, uint32_t attachment_count, VkImageView *attachments, uint32_t width, uint32_t height, VkFramebuffer *framebuffer) {
-    VkFramebufferCreateInfo framebuffer_create_info = {};
-    framebuffer_create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    framebuffer_create_info.renderPass = render_pass;
-    framebuffer_create_info.attachmentCount = attachment_count;
-    framebuffer_create_info.pAttachments = attachments;
-    framebuffer_create_info.width = width;
-    framebuffer_create_info.height = height;
-    framebuffer_create_info.layers = 1;
-    VkResult result = vkCreateFramebuffer(context->device, &framebuffer_create_info, nullptr, framebuffer);
-    assert(result == VK_SUCCESS);
+    // 给 ImageView 命名（用于调试）
+    set_debug_object_name(context, VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t) *image_view, name);
 }
 
 void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_memory) {
@@ -621,7 +548,7 @@ void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usa
     buffer_create_info.queueFamilyIndexCount = 1;
     buffer_create_info.pQueueFamilyIndices = &context->queue_family_index;
     VkResult result = vkCreateBuffer(context->device, &buffer_create_info, nullptr, buffer);
-    assert(result == VK_SUCCESS);
+    VK_CHECK(result);
 
     VkMemoryRequirements memory_requirements;
     vkGetBufferMemoryRequirements(context->device, *buffer, &memory_requirements);
@@ -632,6 +559,16 @@ void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usa
     allocate_memory(context, memory_requirements.size, memory_type_index, buffer_memory);
 
     vkBindBufferMemory(context->device, *buffer, *buffer_memory, 0);
+}
+
+void set_debug_object_name(VkContext *context, VkObjectType object_type, uint64_t object_handle, const char *name) {
+    VkDebugUtilsObjectNameInfoEXT name_info = {};
+    name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+    name_info.objectType = object_type;
+    name_info.objectHandle = object_handle;
+    name_info.pObjectName = name;
+    VkResult result = context->vkSetDebugUtilsObjectNameEXT(context->device, &name_info);
+    VK_CHECK(result);
 }
 
 void create_descriptor_set_layout(VkContext *context) {
@@ -675,7 +612,7 @@ void create_shader_module(VkContext *context, const char *filepath, VkShaderModu
 }
 
 void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology, VkPolygonMode polygon_mode,
-                     bool has_color_attachment, bool depth_test_enabled, bool depth_write_enabled, VkRenderPass render_pass,
+                     bool depth_test_enabled, bool depth_write_enabled, VkFormat color_image_format, VkFormat depth_image_format,
                      const char *vertex_shader_name, const char *fragment_shader_name) {
     if (primitive_topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || primitive_topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP) {
         assert(polygon_mode == VK_POLYGON_MODE_LINE); // polygon mode must be line for line list or line strip topology
@@ -718,7 +655,7 @@ void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology,
     rasterization_state_create_info.lineWidth = 1.0f;
 
     std::vector<VkPipelineColorBlendAttachmentState> color_blend_attachment_states = {};
-    if (has_color_attachment) {
+    if (color_image_format != VK_FORMAT_UNDEFINED) {
         VkPipelineColorBlendAttachmentState color_blend_attachment_state = {};
         color_blend_attachment_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
         color_blend_attachment_state.blendEnable = VK_FALSE;
@@ -781,8 +718,19 @@ void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology,
     dynamic_state_create_info.dynamicStateCount = dynamic_states.size();
     dynamic_state_create_info.pDynamicStates = dynamic_states.data();
 
+    VkPipelineRenderingCreateInfo rendering_info = {};
+    rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    rendering_info.colorAttachmentCount = color_image_format != VK_FORMAT_UNDEFINED ? 1 : 0;
+    if (color_image_format != VK_FORMAT_UNDEFINED) {
+        rendering_info.pColorAttachmentFormats = &color_image_format;
+    }
+    if (depth_test_enabled) {
+        rendering_info.depthAttachmentFormat = depth_image_format;
+    }
+
     VkGraphicsPipelineCreateInfo pipeline_create_info = {};
     pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_create_info.pNext = &rendering_info;  // Dynamic Rendering 信息
     pipeline_create_info.stageCount = std::size(shader_stage_create_infos);
     pipeline_create_info.pStages = shader_stage_create_infos;
     pipeline_create_info.pVertexInputState = &vertex_input_state_create_info;
@@ -794,7 +742,7 @@ void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology,
     pipeline_create_info.pColorBlendState = &color_blend_state_create_info;
     pipeline_create_info.pDynamicState = &dynamic_state_create_info;
     pipeline_create_info.layout = context->pipeline_layout;
-    pipeline_create_info.renderPass = render_pass;
+    pipeline_create_info.renderPass = VK_NULL_HANDLE;  // Dynamic Rendering 必须设置为 NULL
 
     VkPipeline pipeline;
     VkResult result = vkCreateGraphicsPipelines(context->device, nullptr, 1, &pipeline_create_info, nullptr, &pipeline);
@@ -819,22 +767,6 @@ VkPipeline get_pipeline(VkContext *context, PipelineKey pipeline_key) {
     assert(false);
 }
 
-void begin_render_pass(VkContext *context, VkCommandBuffer command_buffer, VkRenderPass render_pass, VkFramebuffer framebuffer, uint32_t width, uint32_t height, uint32_t clear_value_count, VkClearValue *clear_values) {
-    VkRenderPassBeginInfo render_pass_begin_info = {};
-    render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    render_pass_begin_info.renderPass = render_pass;
-    render_pass_begin_info.framebuffer = framebuffer;
-    render_pass_begin_info.renderArea.extent.width = width;
-    render_pass_begin_info.renderArea.extent.height = height;
-    render_pass_begin_info.clearValueCount = clear_value_count;
-    render_pass_begin_info.pClearValues = clear_values;
-    vkCmdBeginRenderPass(command_buffer, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
-}
-
-void end_render_pass(VkContext *context, VkCommandBuffer command_buffer) {
-    vkCmdEndRenderPass(command_buffer);
-}
-
 void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image, VkImageAspectFlags aspect_mask, VkPipelineStageFlags src_stage_flags, VkPipelineStageFlags dst_stage_flags, VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout src_layout, VkImageLayout dst_layout) {
     VkImageMemoryBarrier image_barrier = {};
     image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -853,21 +785,34 @@ void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image
     vkCmdPipelineBarrier(command_buffer, src_stage_flags, dst_stage_flags, 0, 0, nullptr, 0, nullptr, 1, &image_barrier);
 }
 
-void blit_image(VkCommandBuffer command_buffer, VkImage src_image, VkImageLayout src_image_layout, VkImage dst_image, VkImageLayout dst_image_layout, uint32_t width, uint32_t height) {
+void blit_image(VkCommandBuffer command_buffer, VkImage src_image, VkImage dst_image, uint32_t src_width, uint32_t src_height, uint32_t dst_width, uint32_t dst_height) {
+    // 计算缩放比例，保持宽高比
+    float scale_x = (float) dst_width / (float) src_width;
+    float scale_y = (float) dst_height / (float) src_height;
+    float scale = std::min(scale_x, scale_y); // 使用较小的比例，保持宽高比
+
+    // 计算目标区域（居中）
+    uint32_t scaled_width = (uint32_t) (src_width * scale);
+    uint32_t scaled_height = (uint32_t) (src_height * scale);
+    int32_t offset_x = (dst_width - scaled_width) / 2;
+    int32_t offset_y = (dst_height - scaled_height) / 2;
+
     VkImageBlit blit_region = {};
     blit_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit_region.srcSubresource.mipLevel = 0;
     blit_region.srcSubresource.baseArrayLayer = 0;
     blit_region.srcSubresource.layerCount = 1;
     blit_region.srcOffsets[0] = {0, 0, 0};
-    blit_region.srcOffsets[1] = {(int32_t) width, (int32_t) height, 1};
+    blit_region.srcOffsets[1] = {(int32_t) src_width, (int32_t) src_height, 1};
+
     blit_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit_region.dstSubresource.mipLevel = 0;
     blit_region.dstSubresource.baseArrayLayer = 0;
     blit_region.dstSubresource.layerCount = 1;
-    blit_region.dstOffsets[0] = {0, 0, 0};
-    blit_region.dstOffsets[1] = {(int32_t) width, (int32_t) height, 1};
-    vkCmdBlitImage(command_buffer, src_image, src_image_layout, dst_image, dst_image_layout, 1, &blit_region, VK_FILTER_LINEAR);
+    blit_region.dstOffsets[0] = {offset_x, offset_y, 0};
+    blit_region.dstOffsets[1] = {offset_x + (int32_t) scaled_width, offset_y + (int32_t) scaled_height, 1};
+
+    vkCmdBlitImage(command_buffer, src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit_region, VK_FILTER_NEAREST);
 }
 
 void set_viewport(VkCommandBuffer command_buffer, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
@@ -898,6 +843,45 @@ void create_semaphore(VkContext *context, VkSemaphore *semaphore) {
     assert(result == VK_SUCCESS);
 }
 
+void begin_rendering(VkContext *context, VkCommandBuffer command_buffer, VkImageView color_image_view, VkClearColorValue *clear_color_value, VkImageView depth_image_view, VkClearDepthStencilValue *clear_depth_stencil_value, uint32_t width, uint32_t height) {
+    VkRenderingAttachmentInfo color_attachment = {};
+    if (color_image_view) {
+        color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        color_attachment.imageView = color_image_view;
+        color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachment.loadOp = clear_color_value ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        if (clear_color_value) {
+            color_attachment.clearValue.color = *clear_color_value;
+        }
+    }
+
+    VkRenderingAttachmentInfo depth_attachment = {};
+    if (depth_image_view) {
+        depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depth_attachment.imageView = depth_image_view;
+        depth_attachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depth_attachment.loadOp = clear_depth_stencil_value ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        if (clear_depth_stencil_value) {
+            depth_attachment.clearValue.depthStencil = *clear_depth_stencil_value;
+        }
+    }
+
+    VkRenderingInfo rendering_info = {};
+    rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering_info.renderArea = {0, 0, width, height};
+    rendering_info.layerCount = 1;
+    rendering_info.colorAttachmentCount = color_image_view ? 1 : 0;
+    rendering_info.pColorAttachments = color_image_view ? &color_attachment : nullptr;
+    rendering_info.pDepthAttachment = depth_image_view ? &depth_attachment : nullptr;
+    context->vkCmdBeginRendering(command_buffer, &rendering_info);
+}
+
+void end_rendering(VkContext *context, VkCommandBuffer command_buffer) {
+    context->vkCmdEndRendering(command_buffer);
+}
+
 void cleanup_vulkan(VkContext *context) {
     for (const auto &[pipeline_key, pipeline]: context->pipelines) {
         vkDestroyPipeline(context->device, pipeline, nullptr);
@@ -905,8 +889,6 @@ void cleanup_vulkan(VkContext *context) {
     context->pipelines.clear();
     vkDestroyPipelineLayout(context->device, context->pipeline_layout, nullptr);
     vkDestroyDescriptorSetLayout(context->device, context->descriptor_set_layout, nullptr);
-    vkDestroyRenderPass(context->device, context->picking_render_pass, nullptr);
-    vkDestroyRenderPass(context->device, context->render_pass, nullptr);
     vkDestroyCommandPool(context->device, context->command_pool, nullptr);
     destroy_swap_chain(context);
     vkDestroyDevice(context->device, nullptr);

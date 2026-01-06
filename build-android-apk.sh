@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -ex
 
 CLEAN=false
 BUILD=false
@@ -28,18 +28,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ "$CLEAN" = true ]; then
+    pushd org.libsdl.hello > /dev/null
+    ./gradlew clean
+    popd > /dev/null
+fi
+
 if [ "$PURGE" = true ]; then
     pushd org.libsdl.hello > /dev/null
     rm -rf .gradle
     rm -rf build
     rm -rf app/.cxx
     rm -rf app/build
-    popd > /dev/null
-fi
-
-if [ "$CLEAN" = true ]; then
-    pushd org.libsdl.hello > /dev/null
-    ./gradlew clean
     popd > /dev/null
 fi
 

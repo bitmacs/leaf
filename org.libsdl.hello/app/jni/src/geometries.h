@@ -40,7 +40,7 @@ struct GeometryRegistry {
 
 uint32_t request_geometry(GeometryRegistry *geometry, TaskSystem *task_system, VkContext *context, GeometryData &&geometry_data);
 
-void increment_ref_geometry(GeometryRegistry *geometry_registry, uint32_t geometry_handle);
-void decrement_ref_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_system, VkContext *context, uint32_t geometry_handle);
+void increment_geometry_ref(GeometryRegistry *geometry_registry, uint32_t geometry_handle);
+void decrement_geometry_ref(GeometryRegistry *geometry_registry, TaskSystem *task_system, VkContext *context, uint32_t geometry_handle);
 
 bool is_geometry_uploaded(GeometryRegistry *geometry_registry, uint32_t geometry_handle);

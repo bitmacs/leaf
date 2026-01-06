@@ -3,7 +3,7 @@
 #include <mutex>
 
 GeometryData generate_triangle_geometry_data() {
-    GeometryData mesh_data;
+    GeometryData geometry_data;
     // 等边三角形，中心在原点 (0, 0, 0)
     // 三个顶点均匀分布在圆周上，角度间隔为 120 度
     // 顶点1：顶部 (90°) = (0, r, 0)
@@ -11,18 +11,18 @@ GeometryData generate_triangle_geometry_data() {
     // 顶点3：右下 (330°) = (r*√3/2, -r/2, 0)
     const float r = 0.5f;  // 中心到顶点的距离
     const float sqrt3_half = 0.86602540378f;  // √3/2
-    mesh_data.vertices = {
+    geometry_data.vertices = {
         {{ 0.0f,        r, 0.0f}},  // 顶部
         {{-r * sqrt3_half, -r * 0.5f, 0.0f}},  // 左下
         {{ r * sqrt3_half, -r * 0.5f, 0.0f}},  // 右下
     };
-    mesh_data.indices = {0, 1, 2};
-    mesh_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    return mesh_data;
+    geometry_data.indices = {0, 1, 2};
+    geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    return geometry_data;
 }
 
 GeometryData generate_plane_geometry_data(float size, uint32_t segments) {
-    GeometryData mesh;
+    GeometryData geometry_data;
 
     float step = size / (float) segments;
     float half_size = size * 0.5f;
@@ -33,7 +33,7 @@ GeometryData generate_plane_geometry_data(float size, uint32_t segments) {
             float x_pos = -half_size + x * step;
             float z_pos = -half_size + z * step;
 
-            mesh.vertices.push_back({
+            geometry_data.vertices.push_back({
                 {x_pos, 0.0f, z_pos}
             });
         }
@@ -48,19 +48,19 @@ GeometryData generate_plane_geometry_data(float size, uint32_t segments) {
             uint32_t bottom_right = bottom_left + 1;
 
             // 第一个三角形
-            mesh.indices.push_back(top_left);
-            mesh.indices.push_back(bottom_left);
-            mesh.indices.push_back(top_right);
+            geometry_data.indices.push_back(top_left);
+            geometry_data.indices.push_back(bottom_left);
+            geometry_data.indices.push_back(top_right);
 
             // 第二个三角形
-            mesh.indices.push_back(top_right);
-            mesh.indices.push_back(bottom_left);
-            mesh.indices.push_back(bottom_right);
+            geometry_data.indices.push_back(top_right);
+            geometry_data.indices.push_back(bottom_left);
+            geometry_data.indices.push_back(bottom_right);
         }
     }
 
-    mesh.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    return mesh;
+    geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    return geometry_data;
 }
 
 uint32_t request_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_system, VkContext *context, GeometryData &&geometry_data) {
@@ -113,12 +113,12 @@ uint32_t request_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_
     assert(false);
 }
 
-void increment_ref_geometry(GeometryRegistry *geometry_registry, uint32_t geometry_handle) {
+void increment_geometry_ref(GeometryRegistry *geometry_registry, uint32_t geometry_handle) {
     std::lock_guard<std::mutex> lock(geometry_registry->entries_mutex);
     geometry_registry->entries[geometry_handle].ref_count++;
 }
 
-void decrement_ref_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_system, VkContext *context, uint32_t geometry_handle) {
+void decrement_geometry_ref(GeometryRegistry *geometry_registry, TaskSystem *task_system, VkContext *context, uint32_t geometry_handle) {
     std::lock_guard<std::mutex> lock(geometry_registry->entries_mutex);
     GeometryEntry &entry = geometry_registry->entries[geometry_handle];
     if ((--entry.ref_count) == 0) {
