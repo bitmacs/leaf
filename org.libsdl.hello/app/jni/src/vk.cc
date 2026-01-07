@@ -33,6 +33,12 @@ debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT message_severity, VkDebugU
     }
 
     SDL_Log("validation layer: %s: %s: %s", severity_str, type_str, callback_data->pMessage);
+
+    // 当级别为 error 时显式崩溃
+    if (message_severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+        assert(false && "Vulkan validation layer error");
+    }
+
     return VK_FALSE;
 }
 
@@ -165,6 +171,22 @@ void choose_physical_device(VkContext *context) {
 
         context->physical_device = physical_device;
         context->queue_family_index = queue_family_index;
+
+        // 查找专门的 transfer-only queue family（性能更好）
+        uint32_t transfer_queue_family_index = UINT32_MAX;
+        for (uint32_t i = 0; i < queue_family_count; ++i) {
+            // 查找只支持 TRANSFER 的 queue family（不包含 GRAPHICS 和 COMPUTE）
+            if ((queue_families[i].queueFlags & VK_QUEUE_TRANSFER_BIT) && !(queue_families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && !(queue_families[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+                transfer_queue_family_index = i;
+                break;
+            }
+        }
+        // 如果没有找到专门的 transfer queue，使用 graphics queue family（也支持 transfer）
+        if (transfer_queue_family_index == UINT32_MAX) {
+            transfer_queue_family_index = queue_family_index;
+        }
+        context->transfer_queue_family_index = transfer_queue_family_index;
+
         break;
     }
     assert(context->physical_device && "no suitable physical device found");
@@ -204,8 +226,14 @@ void create_device(VkContext *context) {
     required_device_extensions.push_back("VK_KHR_dynamic_rendering");
     required_device_extensions.push_back("VK_KHR_dynamic_rendering_local_read");
 
+    // 扩展顺序（按依赖关系）：基础扩展在前，依赖扩展在后
+    // 1. 独立扩展（不依赖其他）
     required_device_extensions.push_back("VK_KHR_shader_non_semantic_info");
+    // 2. 基础扩展（光线追踪功能链的基础）
+    required_device_extensions.push_back("VK_KHR_buffer_device_address");
+    // 3. 延迟主机操作（acceleration_structure 依赖它）
     required_device_extensions.push_back("VK_KHR_deferred_host_operations");
+    // 4. 加速结构（依赖 buffer_device_address 和 deferred_host_operations）
     required_device_extensions.push_back("VK_KHR_acceleration_structure");
     required_device_extensions.push_back("VK_KHR_ray_query");
     required_device_extensions.push_back("VK_KHR_pipeline_library");
@@ -250,29 +278,69 @@ void create_device(VkContext *context) {
     //     }
     // }
 
-    float queue_priority = 1.0f;
-    VkDeviceQueueCreateInfo queue_create_info = {};
-    queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queue_create_info.queueFamilyIndex = context->queue_family_index;
-    queue_create_info.queueCount = 1;
-    queue_create_info.pQueuePriorities = &queue_priority;
+    // 准备 queue 创建信息
+    std::vector<VkDeviceQueueCreateInfo> queue_create_infos;
+
+    // 主渲染 queue
+    VkDeviceQueueCreateInfo graphics_queue_create_info = {};
+    graphics_queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    graphics_queue_create_info.queueFamilyIndex = context->queue_family_index;
+
+    // 如果 transfer queue family 与 graphics queue family 不同，需要创建额外的 queue
+    if (context->transfer_queue_family_index != context->queue_family_index) {
+        // 使用不同的 queue family，每个 queue family 请求 1 个 queue
+        // graphics queue 优先级更高（1.0），transfer queue 优先级较低（0.5）
+        float graphics_priority = 1.0f;
+        float transfer_priority = 0.5f;
+
+        graphics_queue_create_info.queueCount = 1;
+        graphics_queue_create_info.pQueuePriorities = &graphics_priority;
+        queue_create_infos.push_back(graphics_queue_create_info);
+
+        VkDeviceQueueCreateInfo transfer_queue_create_info = {};
+        transfer_queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        transfer_queue_create_info.queueFamilyIndex = context->transfer_queue_family_index;
+        transfer_queue_create_info.queueCount = 1;
+        transfer_queue_create_info.pQueuePriorities = &transfer_priority;
+        queue_create_infos.push_back(transfer_queue_create_info);
+    } else {
+        // 如果使用同一个 queue family，请求 2 个 queue（一个用于渲染，一个用于传输）
+        // graphics queue (index 0) 优先级 1.0，transfer queue (index 1) 优先级 0.5
+        float queue_priorities[2] = {1.0f, 0.5f};
+        graphics_queue_create_info.queueCount = 2;
+        graphics_queue_create_info.pQueuePriorities = queue_priorities;
+        queue_create_infos.push_back(graphics_queue_create_info);
+    }
 
     VkPhysicalDeviceFeatures device_features = {};
     device_features.fillModeNonSolid = VK_TRUE;
     device_features.vertexPipelineStoresAndAtomics = VK_TRUE;
 
-    // 启用特性（pNext 链顺序：基础特性在前，独立特性在后）
+    // 启用特性（pNext 链顺序：基础特性在前，依赖特性在后）
 
+    // 3. Acceleration Structure 特性（依赖 buffer_device_address，放在 buffer_device_address 之后）
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure_features = {};
+    acceleration_structure_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    acceleration_structure_features.accelerationStructure = VK_TRUE;
+    acceleration_structure_features.pNext = nullptr; // 链的末尾
+
+    // 2. Buffer Device Address 特性（基础特性，acceleration_structure 依赖它，放在链的前面）
+    VkPhysicalDeviceBufferDeviceAddressFeatures buffer_device_address_features = {};
+    buffer_device_address_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+    buffer_device_address_features.bufferDeviceAddress = VK_TRUE;
+    buffer_device_address_features.pNext = &acceleration_structure_features;  // 链接到 acceleration structure
+
+    // 1. Dynamic Rendering 特性（独立特性，不依赖其他）
     VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering_features = {};
     dynamic_rendering_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
     dynamic_rendering_features.dynamicRendering = VK_TRUE;
-    dynamic_rendering_features.pNext = nullptr;
+    dynamic_rendering_features.pNext = &buffer_device_address_features;
 
     VkDeviceCreateInfo device_create_info = {};
     device_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_create_info.pNext = &dynamic_rendering_features; // 通过 pNext 链传递特性
-    device_create_info.queueCreateInfoCount = 1;
-    device_create_info.pQueueCreateInfos = &queue_create_info;
+    device_create_info.queueCreateInfoCount = queue_create_infos.size();
+    device_create_info.pQueueCreateInfos = queue_create_infos.data();
     device_create_info.enabledExtensionCount = required_device_extensions.size();
     device_create_info.ppEnabledExtensionNames = required_device_extensions.data();
     device_create_info.enabledLayerCount = device_layers.size();
@@ -287,6 +355,15 @@ void create_device(VkContext *context) {
 
     vkGetDeviceQueue(context->device, context->queue_family_index, 0, &context->queue);
 
+    // 获取 transfer queue
+    if (context->transfer_queue_family_index != context->queue_family_index) {
+        // 使用独立的 transfer queue family
+        vkGetDeviceQueue(context->device, context->transfer_queue_family_index, 0, &context->transfer_queue);
+    } else {
+        // 使用同一个 queue family 的第二个 queue
+        vkGetDeviceQueue(context->device, context->transfer_queue_family_index, 1, &context->transfer_queue);
+    }
+
     // 加载动态函数（Vulkan 1.3 核心函数，但某些实现可能需要动态加载）
     context->vkCmdSetCullMode = LOAD_DEVICE_PROC_ADDR(context->device, vkCmdSetCullMode);
     assert(context->vkCmdSetCullMode && "vkCmdSetCullMode not available");
@@ -294,6 +371,19 @@ void create_device(VkContext *context) {
     assert(context->vkCmdBeginRendering && "vkCmdBeginRendering not available");
     context->vkCmdEndRendering = LOAD_DEVICE_PROC_ADDR(context->device, vkCmdEndRendering);
     assert(context->vkCmdEndRendering && "vkCmdEndRendering not available");
+    context->vkGetBufferDeviceAddressKHR = LOAD_DEVICE_PROC_ADDR(context->device, vkGetBufferDeviceAddressKHR);
+    assert(context->vkGetBufferDeviceAddressKHR && "vkGetBufferDeviceAddressKHR not available");
+    context->vkGetAccelerationStructureBuildSizesKHR = LOAD_DEVICE_PROC_ADDR(context->device, vkGetAccelerationStructureBuildSizesKHR);
+    assert(context->vkGetAccelerationStructureBuildSizesKHR && "vkGetAccelerationStructureBuildSizesKHR not available");
+    context->vkCreateAccelerationStructureKHR = LOAD_DEVICE_PROC_ADDR(context->device, vkCreateAccelerationStructureKHR);
+    assert(context->vkCreateAccelerationStructureKHR && "vkCreateAccelerationStructureKHR not available");
+    context->vkDestroyAccelerationStructureKHR = LOAD_DEVICE_PROC_ADDR(context->device, vkDestroyAccelerationStructureKHR);
+    assert(context->vkDestroyAccelerationStructureKHR && "vkDestroyAccelerationStructureKHR not available");
+    context->vkGetAccelerationStructureDeviceAddressKHR = LOAD_DEVICE_PROC_ADDR(context->device, vkGetAccelerationStructureDeviceAddressKHR);
+    assert(context->vkGetAccelerationStructureDeviceAddressKHR && "vkGetAccelerationStructureDeviceAddressKHR not available");
+    context->vkCmdBuildAccelerationStructuresKHR = LOAD_DEVICE_PROC_ADDR(context->device, vkCmdBuildAccelerationStructuresKHR);
+    assert(context->vkCmdBuildAccelerationStructuresKHR && "vkCmdBuildAccelerationStructuresKHR not available");
+
     // 加载 Debug Utils 函数（用于资源命名）
     context->vkSetDebugUtilsObjectNameEXT = LOAD_DEVICE_PROC_ADDR(context->device, vkSetDebugUtilsObjectNameEXT);
     assert(context->vkSetDebugUtilsObjectNameEXT && "vkSetDebugUtilsObjectNameEXT not available");
@@ -439,6 +529,13 @@ void create_command_pool(VkContext *context) {
     command_pool_create_info.queueFamilyIndex = context->queue_family_index;
     VkResult result = vkCreateCommandPool(context->device, &command_pool_create_info, nullptr, &context->command_pool);
     assert(result == VK_SUCCESS);
+
+    // 创建用于后台线程传输操作的 command pool
+    // 使用 VK_COMMAND_POOL_CREATE_TRANSIENT_BIT 标志，因为传输操作通常是短暂的
+    command_pool_create_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT | VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    command_pool_create_info.queueFamilyIndex = context->transfer_queue_family_index;
+    result = vkCreateCommandPool(context->device, &command_pool_create_info, nullptr, &context->transfer_command_pool);
+    assert(result == VK_SUCCESS);
 }
 
 void create_pipelines(VkContext *context) {
@@ -447,10 +544,10 @@ void create_pipelines(VkContext *context) {
     create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, false, VK_FORMAT_UNDEFINED, context->depth_image_format, "picking", "picking");
 }
 
-void allocate_command_buffers(VkContext *context, uint32_t count, VkCommandBuffer *command_buffers) {
+void allocate_command_buffers(VkContext *context, VkCommandPool command_pool, uint32_t count, VkCommandBuffer *command_buffers) {
     VkCommandBufferAllocateInfo command_buffer_allocate_info = {};
     command_buffer_allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    command_buffer_allocate_info.commandPool = context->command_pool;
+    command_buffer_allocate_info.commandPool = command_pool;
     command_buffer_allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     command_buffer_allocate_info.commandBufferCount = count;
     VkResult result = vkAllocateCommandBuffers(context->device, &command_buffer_allocate_info, command_buffers);
@@ -472,10 +569,18 @@ void get_memory_type_index(VkContext *context, const VkMemoryRequirements &memor
     assert(*memory_type_index != UINT32_MAX);
 }
 
-void allocate_memory(VkContext *context, VkDeviceSize size, uint32_t memory_type_index, VkDeviceMemory *memory) {
+void allocate_memory(VkContext *context, const VkMemoryRequirements &memory_requirements, VkMemoryPropertyFlags memory_property_flags, VkMemoryAllocateFlags memory_allocate_flags, VkDeviceMemory *memory) {
+    uint32_t memory_type_index = UINT32_MAX;
+    get_memory_type_index(context, memory_requirements, memory_property_flags, &memory_type_index);
+
+    VkMemoryAllocateFlagsInfo memory_allocate_flags_info = {};
+    memory_allocate_flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+    memory_allocate_flags_info.flags = memory_allocate_flags;
+
     VkMemoryAllocateInfo memory_allocate_info = {};
     memory_allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    memory_allocate_info.allocationSize = size;
+    memory_allocate_info.pNext = memory_allocate_flags != 0 ? &memory_allocate_flags_info : nullptr;
+    memory_allocate_info.allocationSize = memory_requirements.size;
     memory_allocate_info.memoryTypeIndex = memory_type_index;
     VkResult result = vkAllocateMemory(context->device, &memory_allocate_info, nullptr, memory);
     assert(result == VK_SUCCESS);
@@ -510,11 +615,13 @@ void create_image(VkContext *context, VkFormat format, uint32_t width, uint32_t 
     VkMemoryRequirements memory_requirements;
     vkGetImageMemoryRequirements(context->device, *image, &memory_requirements);
 
-    uint32_t memory_type_index = UINT32_MAX;
-    get_memory_type_index(context, memory_requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_type_index);
-
-    allocate_memory(context, memory_requirements.size, memory_type_index, image_memory);
+    allocate_memory(context, memory_requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0, image_memory);
     vkBindImageMemory(context->device, *image, *image_memory, 0);
+}
+
+void destroy_image(VkContext *context, VkImage image, VkDeviceMemory image_memory) {
+    vkDestroyImage(context->device, image, nullptr);
+    vkFreeMemory(context->device, image_memory, nullptr);
 }
 
 void create_image_view(VkContext *context, VkImage image, VkFormat format, VkImageAspectFlags aspect_mask, VkImageView *image_view, const char *name) {
@@ -535,15 +642,14 @@ void create_image_view(VkContext *context, VkImage image, VkFormat format, VkIma
     VkResult result = vkCreateImageView(context->device, &image_view_create_info, nullptr, image_view);
     VK_CHECK(result);
 
-    // 给 ImageView 命名（用于调试）
     set_debug_object_name(context, VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t) *image_view, name);
 }
 
-void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_memory) {
+void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags buffer_usage_flags, VkMemoryPropertyFlags memory_property_flags, VkBuffer *buffer, VkDeviceMemory *buffer_memory) {
     VkBufferCreateInfo buffer_create_info = {};
     buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_create_info.size = size;
-    buffer_create_info.usage = usage;
+    buffer_create_info.usage = buffer_usage_flags;
     buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     buffer_create_info.queueFamilyIndexCount = 1;
     buffer_create_info.pQueueFamilyIndices = &context->queue_family_index;
@@ -553,12 +659,15 @@ void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usa
     VkMemoryRequirements memory_requirements;
     vkGetBufferMemoryRequirements(context->device, *buffer, &memory_requirements);
 
-    uint32_t memory_type_index = UINT32_MAX;
-    get_memory_type_index(context, memory_requirements, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &memory_type_index);
-
-    allocate_memory(context, memory_requirements.size, memory_type_index, buffer_memory);
+    VkMemoryAllocateFlags memory_allocate_flags = buffer_usage_flags & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT ? VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT : 0;
+    allocate_memory(context, memory_requirements, memory_property_flags, memory_allocate_flags, buffer_memory);
 
     vkBindBufferMemory(context->device, *buffer, *buffer_memory, 0);
+}
+
+void destroy_buffer(VkContext *context, VkBuffer buffer, VkDeviceMemory buffer_memory) {
+    vkDestroyBuffer(context->device, buffer, nullptr);
+    vkFreeMemory(context->device, buffer_memory, nullptr);
 }
 
 void set_debug_object_name(VkContext *context, VkObjectType object_type, uint64_t object_handle, const char *name) {
@@ -575,6 +684,7 @@ void create_descriptor_set_layout(VkContext *context) {
     VkDescriptorSetLayoutBinding bindings[] = {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}, // camera
         {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // picking storage buffer
+        {2, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // acceleration structure
     };
 
     VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info = {};
@@ -835,11 +945,27 @@ void set_scissor(VkCommandBuffer command_buffer, uint32_t x, uint32_t y, uint32_
     vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 }
 
+void copy_buffer(VkCommandBuffer command_buffer, VkBuffer src_buffer, VkBuffer dst_buffer, VkDeviceSize size) {
+    VkBufferCopy copy_region = {};
+    copy_region.srcOffset = 0;
+    copy_region.dstOffset = 0;
+    copy_region.size = size;
+    vkCmdCopyBuffer(command_buffer, src_buffer, dst_buffer, 1, &copy_region);
+}
+
 void create_semaphore(VkContext *context, VkSemaphore *semaphore) {
     VkSemaphoreCreateInfo semaphore_create_info = {};
     semaphore_create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     semaphore_create_info.flags = VK_SEMAPHORE_TYPE_BINARY;
     VkResult result = vkCreateSemaphore(context->device, &semaphore_create_info, nullptr, semaphore);
+    assert(result == VK_SUCCESS);
+}
+
+void create_fence(VkContext *context, bool signaled, VkFence *fence) {
+    VkFenceCreateInfo fence_create_info = {};
+    fence_create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fence_create_info.flags = signaled ? VK_FENCE_CREATE_SIGNALED_BIT : 0;
+    VkResult result = vkCreateFence(context->device, &fence_create_info, nullptr, fence);
     assert(result == VK_SUCCESS);
 }
 
@@ -882,6 +1008,52 @@ void end_rendering(VkContext *context, VkCommandBuffer command_buffer) {
     context->vkCmdEndRendering(command_buffer);
 }
 
+void execute_one_time_submit(VkContext *context, VkCommandPool command_pool, VkQueue queue, std::function<void(VkCommandBuffer)> &&func) {
+    VkCommandBuffer command_buffer;
+    allocate_command_buffers(context, command_pool, 1, &command_buffer);
+
+    VkCommandBufferBeginInfo command_buffer_begin_info = {};
+    command_buffer_begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VkResult result = vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info);
+    VK_CHECK(result);
+
+    func(command_buffer);
+
+    result = vkEndCommandBuffer(command_buffer);
+    VK_CHECK(result);
+
+    VkFence fence;
+    create_fence(context, false, &fence);
+
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+    result = vkQueueSubmit(queue, 1, &submit_info, fence);
+    VK_CHECK(result);
+
+    result = vkWaitForFences(context->device, 1, &fence, VK_TRUE, UINT64_MAX);
+    VK_CHECK(result);
+
+    vkDestroyFence(context->device, fence, nullptr);
+    vkFreeCommandBuffers(context->device, command_pool, 1, &command_buffer);
+}
+
+VkDeviceAddress get_buffer_device_address(VkContext *context, VkBuffer buffer) {
+    VkBufferDeviceAddressInfo address_info = {};
+    address_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    address_info.buffer = buffer;
+    return context->vkGetBufferDeviceAddressKHR(context->device, &address_info);
+}
+
+VkDeviceAddress get_acceleration_structure_device_address(VkContext *context, VkAccelerationStructureKHR acceleration_structure) {
+    VkAccelerationStructureDeviceAddressInfoKHR address_info = {};
+    address_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    address_info.accelerationStructure = acceleration_structure;
+    return context->vkGetAccelerationStructureDeviceAddressKHR(context->device, &address_info);
+}
+
 void cleanup_vulkan(VkContext *context) {
     for (const auto &[pipeline_key, pipeline]: context->pipelines) {
         vkDestroyPipeline(context->device, pipeline, nullptr);
@@ -889,6 +1061,7 @@ void cleanup_vulkan(VkContext *context) {
     context->pipelines.clear();
     vkDestroyPipelineLayout(context->device, context->pipeline_layout, nullptr);
     vkDestroyDescriptorSetLayout(context->device, context->descriptor_set_layout, nullptr);
+    vkDestroyCommandPool(context->device, context->transfer_command_pool, nullptr);
     vkDestroyCommandPool(context->device, context->command_pool, nullptr);
     destroy_swap_chain(context);
     vkDestroyDevice(context->device, nullptr);

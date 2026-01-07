@@ -57,8 +57,10 @@ struct VkContext {
     VkSurfaceKHR surface;
     VkPhysicalDevice physical_device;
     uint32_t queue_family_index;
+    uint32_t transfer_queue_family_index;
     VkDevice device;
     VkQueue queue;
+    VkQueue transfer_queue;
     VkSwapchainKHR swap_chain;
     VkFormat surface_format;
     VkColorSpaceKHR surface_color_space;
@@ -66,6 +68,7 @@ struct VkContext {
     std::vector<VkImageView> swap_chain_image_views;
     VkFormat depth_image_format;
     VkCommandPool command_pool;
+    VkCommandPool transfer_command_pool;
     VkDescriptorSetLayout descriptor_set_layout;
     VkPipelineLayout pipeline_layout;
     std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelines;
@@ -74,6 +77,12 @@ struct VkContext {
     PFN_vkCmdSetCullMode vkCmdSetCullMode;
     PFN_vkCmdBeginRendering vkCmdBeginRendering;
     PFN_vkCmdEndRendering vkCmdEndRendering;
+    PFN_vkGetBufferDeviceAddressKHR vkGetBufferDeviceAddressKHR;
+    PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHR;
+    PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR;
+    PFN_vkDestroyAccelerationStructureKHR vkDestroyAccelerationStructureKHR;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR vkGetAccelerationStructureDeviceAddressKHR;
+    PFN_vkCmdBuildAccelerationStructuresKHR vkCmdBuildAccelerationStructuresKHR;
     PFN_vkSetDebugUtilsObjectNameEXT vkSetDebugUtilsObjectNameEXT;
 };
 
@@ -94,19 +103,23 @@ void create_command_pool(VkContext *context);
 
 void create_pipelines(VkContext *context);
 
-void allocate_command_buffers(VkContext *context, uint32_t count, VkCommandBuffer *command_buffers);
+void allocate_command_buffers(VkContext *context, VkCommandPool command_pool, uint32_t count, VkCommandBuffer *command_buffers);
 
 void get_memory_type_index(VkContext *context, const VkMemoryRequirements &memory_requirements, VkMemoryPropertyFlags memory_property_flags, uint32_t *memory_type_index);
 
-void allocate_memory(VkContext *context, VkDeviceSize size, uint32_t memory_type_index, VkDeviceMemory *memory);
+void allocate_memory(VkContext *context, const VkMemoryRequirements &memory_requirements, VkMemoryPropertyFlags memory_property_flags, VkMemoryAllocateFlags memory_allocate_flags, VkDeviceMemory *memory);
 
 void allocate_descriptor_set(VkContext *context, VkDescriptorPool descriptor_pool, VkDescriptorSet *descriptor_set);
 
 void create_image(VkContext *context, VkFormat format, uint32_t width, uint32_t height, VkImageUsageFlags usage, VkImage *image, VkDeviceMemory *image_memory);
 
+void destroy_image(VkContext *context, VkImage image, VkDeviceMemory image_memory);
+
 void create_image_view(VkContext *context, VkImage image, VkFormat format, VkImageAspectFlags aspect_mask, VkImageView *image_view, const char *name);
 
-void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buffer, VkDeviceMemory *buffer_memory);
+void create_buffer(VkContext *context, VkDeviceSize size, VkBufferUsageFlags buffer_usage_flags, VkMemoryPropertyFlags memory_property_flags, VkBuffer *buffer, VkDeviceMemory *buffer_memory);
+
+void destroy_buffer(VkContext *context, VkBuffer buffer, VkDeviceMemory buffer_memory);
 
 void set_debug_object_name(VkContext *context, VkObjectType object_type, uint64_t object_handle, const char *name);
 
@@ -128,10 +141,20 @@ void set_viewport(VkCommandBuffer command_buffer, uint32_t x, uint32_t y, uint32
 
 void set_scissor(VkCommandBuffer command_buffer, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 
+void copy_buffer(VkCommandBuffer command_buffer, VkBuffer src_buffer, VkBuffer dst_buffer, VkDeviceSize size);
+
 void create_semaphore(VkContext *context, VkSemaphore *semaphore);
+
+void create_fence(VkContext *context, bool signaled, VkFence *fence);
 
 void begin_rendering(VkContext *context, VkCommandBuffer command_buffer, VkImageView color_image_view, VkClearColorValue *clear_color_value, VkImageView depth_image_view, VkClearDepthStencilValue *clear_depth_stencil_value, uint32_t width, uint32_t height);
 
 void end_rendering(VkContext *context, VkCommandBuffer command_buffer);
+
+void execute_one_time_submit(VkContext *context, VkCommandPool command_pool, VkQueue queue, std::function<void(VkCommandBuffer)> &&func);
+
+VkDeviceAddress get_buffer_device_address(VkContext *context, VkBuffer buffer);
+
+VkDeviceAddress get_acceleration_structure_device_address(VkContext *context, VkAccelerationStructureKHR acceleration_structure);
 
 void cleanup_vulkan(VkContext *context);

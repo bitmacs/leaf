@@ -25,6 +25,10 @@ struct Geometry {
     uint32_t index_count;
     VkIndexType index_type;
     VkPrimitiveTopology primitive_topology;
+
+    VkAccelerationStructureKHR blas;
+    VkBuffer blas_buffer;  // 存储构建好的 blas 数据（硬件 bvh 树）
+    VkDeviceMemory blas_memory;
 };
 
 struct GeometryEntry {

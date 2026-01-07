@@ -5,12 +5,14 @@
 #include "tasks.h"
 #include "vk.h"
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_vulkan.h>
 #include <unordered_set>
 
 #define MAX_FRAMES_IN_FLIGHT 2
+#define MAX_TOP_LEVEL_ACCELERATION_STRUCTURE_INSTANCE_COUNT 1024
 
 enum PickingState {
     PICKING_STATE_NONE = 0,
@@ -101,12 +103,22 @@ static glm::vec2 mouse_pos = glm::vec2(0.0f);
 static CameraData camera_data[2] = {}; // [0] = scene camera, [1] = ui camera
 static std::vector<VkBuffer> camera_buffers = {}; // each in-flight frame has one camera buffer
 static std::vector<VkDeviceMemory> camera_buffer_memories = {}; // each in-flight frame has one camera buffer memory
+
+static std::vector<VkAccelerationStructureKHR> tlas = {}; // each in-flight frame has one tlas
+static std::vector<VkBuffer> tlas_buffers = {}; // each in-flight frame has one tlas buffer
+static std::vector<VkDeviceMemory> tlas_buffer_memories = {}; // each in-flight frame has one tlas buffer memory
+static std::vector<VkBuffer> instance_buffers = {}; // each in-flight frame has one instance buffer
+static std::vector<VkDeviceMemory> instance_buffer_memories = {}; // each in-flight frame has one instance buffer memory
+static std::vector<VkBuffer> scratch_buffers = {}; // each in-flight frame has one scratch buffer
+static std::vector<VkDeviceMemory> scratch_buffer_memories = {}; // each in-flight frame has one scratch buffer memory
+
 static std::vector<Entity> entities = {};
 
 static glm::mat4 compute_model_matrix(const Transform &transform) {
-    glm::mat4 translation = glm::translate(glm::mat4(1.0f), transform.position);
+    glm::mat4 identity = glm::mat4(1.0f);
+    glm::mat4 translation = glm::translate(identity, transform.position);
     glm::mat4 rotation = glm::mat4_cast(transform.orientation);
-    glm::mat4 scale = glm::scale(glm::mat4(1.0f), transform.scale);
+    glm::mat4 scale = glm::scale(identity, transform.scale);
     return translation * rotation * scale;
 }
 
@@ -116,6 +128,7 @@ static void create_descriptor_pools(VkContext *context) {
     VkDescriptorPoolSize descriptor_pool_sizes[] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}, // camera
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, // picking storage buffer
+        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}, // acceleration structure
     };
 
     VkDescriptorPoolCreateInfo descriptor_pool_create_info = {};
@@ -154,10 +167,8 @@ static void destroy_framebuffers() {
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         vkDestroyImageView(vk_context.device, color_image_views[i], nullptr);
         vkDestroyImageView(vk_context.device, depth_image_views[i], nullptr);
-        vkDestroyImage(vk_context.device, color_images[i], nullptr);
-        vkDestroyImage(vk_context.device, depth_images[i], nullptr);
-        vkFreeMemory(vk_context.device, color_image_memories[i], nullptr);
-        vkFreeMemory(vk_context.device, depth_image_memories[i], nullptr);
+        destroy_image(&vk_context, color_images[i], color_image_memories[i]);
+        destroy_image(&vk_context, depth_images[i], depth_image_memories[i]);
     }
     color_image_views.clear();
     depth_image_views.clear();
@@ -165,6 +176,74 @@ static void destroy_framebuffers() {
     depth_images.clear();
     color_image_memories.clear();
     depth_image_memories.clear();
+}
+
+static void create_top_level_acceleration_structures(VkContext *context, uint32_t max_instance_count) {
+    tlas.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+    tlas_buffers.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+    tlas_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+    instance_buffers.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+    instance_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+    scratch_buffers.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+    scratch_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        VkAccelerationStructureGeometryKHR geometry{
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+            .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+            .geometry = {
+                .instances = {
+                    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+                    .arrayOfPointers = VK_FALSE,
+                    .data = { .deviceAddress = 0 } // 空 TLAS：地址为 0
+                }
+            },
+            .flags = VK_GEOMETRY_OPAQUE_BIT_KHR
+        };
+        VkAccelerationStructureBuildGeometryInfoKHR build_geometry_info = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+            .type  = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+            .flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR,
+            .mode  = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+            .geometryCount = 1,
+            .pGeometries   = &geometry
+        };
+        VkAccelerationStructureBuildSizesInfoKHR build_sizes_info = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR
+        };
+        context->vkGetAccelerationStructureBuildSizesKHR(
+            context->device,
+            VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+            &build_geometry_info,
+            &max_instance_count,
+            &build_sizes_info
+        );
+        create_buffer(
+            context,
+            build_sizes_info.accelerationStructureSize,
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            &tlas_buffers[i],
+            &tlas_buffer_memories[i]
+        );
+        VkAccelerationStructureCreateInfoKHR create_info = {
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+            .buffer = tlas_buffers[i],
+            .size   = build_sizes_info.accelerationStructureSize,
+            .type   = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR
+        };
+        VkResult result = context->vkCreateAccelerationStructureKHR(context->device, &create_info, nullptr, &tlas[i]);
+        assert(result == VK_SUCCESS);
+        VkDeviceSize scratch_buffer_size = std::max(build_sizes_info.buildScratchSize, build_sizes_info.updateScratchSize);
+        create_buffer(
+            context,
+            scratch_buffer_size,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            &scratch_buffers[i],
+            &scratch_buffer_memories[i]
+        );
+    }
 }
 
 static void app_resize(AppState *app_state) {
@@ -252,23 +331,20 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     }
 
     fences.resize(MAX_FRAMES_IN_FLIGHT);
-    VkFenceCreateInfo fence_create_info = {};
-    fence_create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fence_create_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        VkResult result = vkCreateFence(vk_context.device, &fence_create_info, nullptr, &fences[i]);
-        assert(result == VK_SUCCESS);
+        create_fence(&vk_context, true, &fences[i]);
     }
 
     command_buffers.resize(MAX_FRAMES_IN_FLIGHT);
-    allocate_command_buffers(&vk_context, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
+    allocate_command_buffers(&vk_context, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
 
     create_framebuffers(app_state);
     picking_storage_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     picking_storage_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_buffer(&vk_context, sizeof(PickingResult), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &picking_storage_buffers[i], &picking_storage_buffer_memories[i]);
+        create_buffer(&vk_context, sizeof(PickingResult), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &picking_storage_buffers[i], &picking_storage_buffer_memories[i]);
     }
+    create_top_level_acceleration_structures(&vk_context, MAX_TOP_LEVEL_ACCELERATION_STRUCTURE_INSTANCE_COUNT);
 
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
     picking_states.resize(MAX_FRAMES_IN_FLIGHT, PICKING_STATE_NONE);
@@ -276,7 +352,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     camera_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     camera_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_buffer(&vk_context, sizeof(CameraData) * 2, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &camera_buffers[i], &camera_buffer_memories[i]);
+        create_buffer(&vk_context, sizeof(CameraData) * 2, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &camera_buffers[i], &camera_buffer_memories[i]);
     }
 
     {
@@ -458,45 +534,6 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         vkUnmapMemory(vk_context.device, picking_storage_buffer_memories[frame_index]);
     }
 
-    // update descriptor set
-    std::vector<VkWriteDescriptorSet> write_descriptor_sets = {};
-
-    {
-        VkDescriptorBufferInfo buffer_info = {};
-        buffer_info.buffer = camera_buffers[frame_index];
-        buffer_info.offset = 0;
-        buffer_info.range = sizeof(CameraData) * 2;
-
-        VkWriteDescriptorSet write_descriptor_set = {};
-        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write_descriptor_set.dstSet = descriptor_sets[frame_index];
-        write_descriptor_set.dstBinding = 0;
-        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        write_descriptor_set.descriptorCount = 1;
-        write_descriptor_set.pBufferInfo = &buffer_info;
-        write_descriptor_sets.push_back(write_descriptor_set);
-    }
-
-    if (picking_states[frame_index] == PICKING_STATE_REQUESTED) {
-        VkDescriptorBufferInfo buffer_info = {};
-        buffer_info.buffer = picking_storage_buffers[frame_index];
-        buffer_info.offset = 0;
-        buffer_info.range = sizeof(PickingResult);
-
-        VkWriteDescriptorSet write_descriptor_set = {};
-        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write_descriptor_set.dstSet = descriptor_sets[frame_index];
-        write_descriptor_set.dstBinding = 1;
-        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write_descriptor_set.descriptorCount = 1;
-        write_descriptor_set.pBufferInfo = &buffer_info;
-        write_descriptor_sets.push_back(write_descriptor_set);
-    }
-
-    build_top_level_acceleration_structure();
-
-    vkUpdateDescriptorSets(vk_context.device, write_descriptor_sets.size(), write_descriptor_sets.data(), 0, nullptr);
-
     // Update game logic, physics, animations, etc.
     // Process input events
     // Update scene graph
@@ -505,11 +542,57 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     // collect renderables
     std::vector<Renderable> renderables = {};
     for (const Entity &entity : entities) {
-        if (!is_geometry_uploaded(&geometry_registry, entity.geometry_handle)) { continue; } // skip if this geometry is not uploaded yet
+        if (!is_geometry_uploaded(&geometry_registry, entity.geometry_handle)) { continue; }
         frame_states[frame_index].geometry_handles.insert(entity.geometry_handle);
         increment_geometry_ref(&geometry_registry, entity.geometry_handle);
         renderables.push_back({entity.entity_id, entity.geometry_handle, compute_model_matrix(entity.transform), entity.color});
     }
+
+    // update descriptor set
+    std::vector<VkWriteDescriptorSet> write_descriptor_sets = {};
+    {
+        VkDescriptorBufferInfo cameras_buffer_info = {};
+        cameras_buffer_info.buffer = camera_buffers[frame_index];
+        cameras_buffer_info.offset = 0;
+        cameras_buffer_info.range = sizeof(CameraData) * 2;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 0;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pBufferInfo = &cameras_buffer_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    if (picking_states[frame_index] == PICKING_STATE_REQUESTED) {
+        VkDescriptorBufferInfo picking_storage_buffer_info = {};
+        picking_storage_buffer_info.buffer = picking_storage_buffers[frame_index];
+        picking_storage_buffer_info.offset = 0;
+        picking_storage_buffer_info.range = sizeof(PickingResult);
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 1;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pBufferInfo = &picking_storage_buffer_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkWriteDescriptorSetAccelerationStructureKHR tlas_write_descriptor_set = {};
+        tlas_write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+        tlas_write_descriptor_set.accelerationStructureCount = 1;
+        tlas_write_descriptor_set.pAccelerationStructures = &tlas[frame_index];
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 2;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pNext = &tlas_write_descriptor_set;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    vkUpdateDescriptorSets(vk_context.device, write_descriptor_sets.size(), write_descriptor_sets.data(), 0, nullptr);
 
     // ========== GPU 资源获取阶段 ==========
     // acquire the next image
@@ -720,24 +803,6 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     result = vkQueuePresentKHR(vk_context.queue, &present_info);
     VK_CHECK(result);
 
-    // const char *message = "Hello World!";
-    // int w = 0, h = 0;
-    // float x, y;
-    // const float scale = 4.0f;
-    //
-    // /* Center the message and scale it up */
-    // SDL_GetRenderOutputSize(renderer, &w, &h);
-    // SDL_SetRenderScale(renderer, scale, scale);
-    // x = ((w / scale) - SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * SDL_strlen(message)) / 2;
-    // y = ((h / scale) - SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE) / 2;
-    //
-    // /* Draw the message */
-    // SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-    // SDL_RenderClear(renderer);
-    // SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-    // SDL_RenderDebugText(renderer, x, y, message);
-    // SDL_RenderPresent(renderer);
-
     frame_index = (frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
 
     return SDL_APP_CONTINUE;
@@ -748,8 +813,7 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
 {
     vkDeviceWaitIdle(vk_context.device);
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        vkDestroyBuffer(vk_context.device, camera_buffers[i], nullptr);
-        vkFreeMemory(vk_context.device, camera_buffer_memories[i], nullptr);
+        destroy_buffer(&vk_context, camera_buffers[i], camera_buffer_memories[i]);
     }
     camera_buffers.clear();
     camera_buffer_memories.clear();
@@ -766,8 +830,20 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     }
     entities.clear();
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        vkDestroyBuffer(vk_context.device, picking_storage_buffers[i], nullptr);
-        vkFreeMemory(vk_context.device, picking_storage_buffer_memories[i], nullptr);
+        vk_context.vkDestroyAccelerationStructureKHR(vk_context.device, tlas[i], nullptr);
+        destroy_buffer(&vk_context, tlas_buffers[i], tlas_buffer_memories[i]);
+        destroy_buffer(&vk_context, instance_buffers[i], instance_buffer_memories[i]);
+        destroy_buffer(&vk_context, scratch_buffers[i], scratch_buffer_memories[i]);
+    }
+    tlas.clear();
+    tlas_buffers.clear();
+    tlas_buffer_memories.clear();
+    instance_buffers.clear();
+    instance_buffer_memories.clear();
+    scratch_buffers.clear();
+    scratch_buffer_memories.clear();
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        destroy_buffer(&vk_context, picking_storage_buffers[i], picking_storage_buffer_memories[i]);
     }
     picking_storage_buffers.clear();
     picking_storage_buffer_memories.clear();

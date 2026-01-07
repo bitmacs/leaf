@@ -73,28 +73,132 @@ uint32_t request_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_
                 Geometry geometry = {};
 
                 {
-                    create_buffer(context, sizeof(Vertex) * mesh_data.vertices.size(), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &geometry.vertex_buffer, &geometry.vertex_buffer_memory);
+                    uint64_t buffer_size = sizeof(Vertex) * mesh_data.vertices.size();
+                    VkBufferUsageFlags buffer_usage_flags = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+                    VkMemoryPropertyFlags memory_property_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                    VkBuffer staging_buffer = {};
+                    VkDeviceMemory staging_buffer_memory = {};
+                    create_buffer(context, buffer_size, buffer_usage_flags, memory_property_flags, &geometry.vertex_buffer, &geometry.vertex_buffer_memory);
 
-                    void *buffer_data = nullptr;
-                    vkMapMemory(context->device, geometry.vertex_buffer_memory, 0, sizeof(Vertex) * mesh_data.vertices.size(), 0, &buffer_data);
-                    memcpy(buffer_data, mesh_data.vertices.data(), sizeof(Vertex) * mesh_data.vertices.size());
-                    vkUnmapMemory(context->device, geometry.vertex_buffer_memory);
+                    buffer_usage_flags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+                    memory_property_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                    create_buffer(context, buffer_size, buffer_usage_flags, memory_property_flags, &staging_buffer, &staging_buffer_memory);
+
+                    void *staging_data = nullptr;
+                    vkMapMemory(context->device, staging_buffer_memory, 0, buffer_size, 0, &staging_data);
+                    memcpy(staging_data, mesh_data.vertices.data(), sizeof(Vertex) * mesh_data.vertices.size());
+                    vkUnmapMemory(context->device, staging_buffer_memory);
+
+                    execute_one_time_submit(context, context->transfer_command_pool, context->transfer_queue, [&](VkCommandBuffer command_buffer) {
+                        copy_buffer(command_buffer, staging_buffer, geometry.vertex_buffer, buffer_size);
+                    });
+                    destroy_buffer(context, staging_buffer, staging_buffer_memory);
 
                     geometry.vertex_count = mesh_data.vertices.size(); // 保存绘制元数据
                 }
 
                 if (!mesh_data.indices.empty()) {
-                    create_buffer(context, sizeof(uint32_t) * mesh_data.indices.size(), VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &geometry.index_buffer, &geometry.index_buffer_memory);
+                    uint64_t buffer_size = sizeof(uint32_t) * mesh_data.indices.size();
+                    VkBufferUsageFlags buffer_usage_flags = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+                    VkMemoryPropertyFlags memory_property_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                    VkBuffer staging_buffer = {};
+                    VkDeviceMemory staging_buffer_memory = {};
+                    create_buffer(context, buffer_size, buffer_usage_flags, memory_property_flags, &geometry.index_buffer, &geometry.index_buffer_memory);
 
-                    void *buffer_data = nullptr;
-                    vkMapMemory(context->device, geometry.index_buffer_memory, 0, sizeof(uint32_t) * mesh_data.indices.size(), 0, &buffer_data);
-                    memcpy(buffer_data, mesh_data.indices.data(), sizeof(uint32_t) * mesh_data.indices.size());
-                    vkUnmapMemory(context->device, geometry.index_buffer_memory);
+                    buffer_usage_flags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+                    memory_property_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                    create_buffer(context, buffer_size, buffer_usage_flags, memory_property_flags, &staging_buffer, &staging_buffer_memory);
+
+                    void *staging_data = nullptr;
+                    vkMapMemory(context->device, staging_buffer_memory, 0, buffer_size, 0, &staging_data);
+                    memcpy(staging_data, mesh_data.indices.data(), sizeof(uint32_t) * mesh_data.indices.size());
+                    vkUnmapMemory(context->device, staging_buffer_memory);
+
+                    execute_one_time_submit(context, context->transfer_command_pool, context->transfer_queue, [&](VkCommandBuffer command_buffer) {
+                        copy_buffer(command_buffer, staging_buffer, geometry.index_buffer, buffer_size);
+                    });
+                    destroy_buffer(context, staging_buffer, staging_buffer_memory);
 
                     geometry.index_count = mesh_data.indices.size();
                     geometry.index_type = VK_INDEX_TYPE_UINT32; // 默认使用 uint32 索引
                 }
                 geometry.primitive_topology = mesh_data.primitive_topology;
+                {
+                    // BLAS 构建流程
+
+                    // 描述三角形几何数据，告诉 Vulkan 如何读取顶点和索引数据
+                    VkAccelerationStructureGeometryTrianglesDataKHR as_geometry_triangles_data = {};
+                    as_geometry_triangles_data.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+                    as_geometry_triangles_data.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+                    as_geometry_triangles_data.vertexData.deviceAddress = get_buffer_device_address(context, geometry.vertex_buffer);
+                    as_geometry_triangles_data.vertexStride = sizeof(Vertex);
+                    as_geometry_triangles_data.maxVertex = geometry.vertex_count - 1;
+                    as_geometry_triangles_data.indexType = geometry.index_count > 0 ? geometry.index_type : VK_INDEX_TYPE_NONE_KHR;
+                    as_geometry_triangles_data.indexData.deviceAddress = geometry.index_count > 0 ? get_buffer_device_address(context, geometry.index_buffer) : 0;
+                    as_geometry_triangles_data.transformData.deviceAddress = 0;
+
+                    // 包装几何描述，将三角形数据包装成几何描述，指定几何类型和属性
+                    VkAccelerationStructureGeometryKHR as_geometry = {};
+                    as_geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+                    as_geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+                    as_geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR; // 不透明几何（光线不会进入内部，可以优化遍历）
+                    as_geometry.geometry.triangles = as_geometry_triangles_data;
+
+                    // 配置构建信息
+                    VkAccelerationStructureBuildGeometryInfoKHR as_build_geometry_info = {};
+                    as_build_geometry_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+                    as_build_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                    as_build_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+                    as_build_geometry_info.geometryCount = 1;
+                    as_build_geometry_info.pGeometries = &as_geometry;
+
+                    // 计算图元（三角形）数量：如果有索引则使用索引数，否则使用顶点数
+                    uint32_t primitive_count = geometry.index_count > 0 ? geometry.index_count / 3 : geometry.vertex_count / 3;
+
+                    // 查询内存需求，返回三个大小：AS 本身大小、构建临时内存、更新临时内存
+                    VkAccelerationStructureBuildSizesInfoKHR as_build_sizes_info = {};
+                    as_build_sizes_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+                    context->vkGetAccelerationStructureBuildSizesKHR(context->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &as_build_geometry_info, &primitive_count, &as_build_sizes_info);
+
+                    // 分配 BLAS 存储缓冲区
+                    VkMemoryPropertyFlags blas_memory_properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+                    VkBufferUsageFlags blas_buffer_usage = VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+                    create_buffer(context, as_build_sizes_info.accelerationStructureSize, blas_buffer_usage, blas_memory_properties, &geometry.blas_buffer, &geometry.blas_memory);
+
+                    // 创建加速结构对象（此时还没有数据，数据需要构建后才有）
+                    VkAccelerationStructureCreateInfoKHR as_create_info = {};
+                    as_create_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+                    as_create_info.buffer = geometry.blas_buffer; // 关联存储缓冲区
+                    as_create_info.size = as_build_sizes_info.accelerationStructureSize; // 缓冲区大小
+                    as_create_info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                    VkResult result = context->vkCreateAccelerationStructureKHR(context->device, &as_create_info, nullptr, &geometry.blas);
+                    assert(result == VK_SUCCESS);
+
+                    // 分配 Scratch 缓冲区（临时工作空间）
+                    VkBuffer scratch_buffer;
+                    VkDeviceMemory scratch_buffer_memory;
+                    VkBufferUsageFlags scratch_buffer_usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+                    create_buffer(context, as_build_sizes_info.buildScratchSize, scratch_buffer_usage, blas_memory_properties, &scratch_buffer, &scratch_buffer_memory);
+
+                    // 更新构建信息，告诉构建命令将结果写入哪里，使用哪个 scratch buffer
+                    as_build_geometry_info.dstAccelerationStructure = geometry.blas;
+                    as_build_geometry_info.scratchData.deviceAddress = get_buffer_device_address(context, scratch_buffer);
+
+                    // 准备构建范围，指定构建哪些图元（支持部分构建和多几何体）
+                    VkAccelerationStructureBuildRangeInfoKHR build_range_info = {};
+                    build_range_info.primitiveCount = primitive_count;
+                    build_range_info.primitiveOffset = 0;
+                    build_range_info.firstVertex = 0;
+                    build_range_info.transformOffset = 0;
+
+                    const VkAccelerationStructureBuildRangeInfoKHR *p_build_range_infos = &build_range_info;
+
+                    execute_one_time_submit(context, context->transfer_command_pool, context->transfer_queue, [&](VkCommandBuffer command_buffer) {
+                        context->vkCmdBuildAccelerationStructuresKHR(command_buffer, 1, &as_build_geometry_info, &p_build_range_infos);
+                    });
+
+                    destroy_buffer(context, scratch_buffer, scratch_buffer_memory);
+                }
                 return geometry;
             };
             std::function<void(const Geometry &)> task_callback = [geometry_registry, i](const Geometry &geometry) mutable {
@@ -125,12 +229,12 @@ void decrement_geometry_ref(GeometryRegistry *geometry_registry, TaskSystem *tas
         Geometry geometry = entry.geometry;
         memset(&entry, 0, sizeof(GeometryEntry)); // zero out the entry
         push_task(task_system, [context, geometry]() {
+            context->vkDestroyAccelerationStructureKHR(context->device, geometry.blas, nullptr);
+            destroy_buffer(context, geometry.blas_buffer, geometry.blas_memory);
             if (geometry.index_count > 0) {
-                vkDestroyBuffer(context->device, geometry.index_buffer, nullptr);
-                vkFreeMemory(context->device, geometry.index_buffer_memory, nullptr);
+                destroy_buffer(context, geometry.index_buffer, geometry.index_buffer_memory);
             }
-            vkDestroyBuffer(context->device, geometry.vertex_buffer, nullptr);
-            vkFreeMemory(context->device, geometry.vertex_buffer_memory, nullptr);
+            destroy_buffer(context, geometry.vertex_buffer, geometry.vertex_buffer_memory);
         });
     }
 }
