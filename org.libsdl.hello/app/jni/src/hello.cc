@@ -107,10 +107,10 @@ static std::vector<VkDeviceMemory> camera_buffer_memories = {}; // each in-fligh
 static std::vector<VkAccelerationStructureKHR> tlas = {}; // each in-flight frame has one tlas
 static std::vector<VkBuffer> tlas_buffers = {}; // each in-flight frame has one tlas buffer
 static std::vector<VkDeviceMemory> tlas_buffer_memories = {}; // each in-flight frame has one tlas buffer memory
-static std::vector<VkBuffer> instance_buffers = {}; // each in-flight frame has one instance buffer
-static std::vector<VkDeviceMemory> instance_buffer_memories = {}; // each in-flight frame has one instance buffer memory
 static std::vector<VkBuffer> scratch_buffers = {}; // each in-flight frame has one scratch buffer
 static std::vector<VkDeviceMemory> scratch_buffer_memories = {}; // each in-flight frame has one scratch buffer memory
+static std::vector<VkBuffer> instance_buffers = {}; // each in-flight frame has one instance buffer
+static std::vector<VkDeviceMemory> instance_buffer_memories = {}; // each in-flight frame has one instance buffer memory
 
 static std::vector<Entity> entities = {};
 
@@ -182,10 +182,10 @@ static void create_top_level_acceleration_structures(VkContext *context, uint32_
     tlas.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
     tlas_buffers.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
     tlas_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
-    instance_buffers.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
-    instance_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
     scratch_buffers.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
     scratch_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+    instance_buffers.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+    instance_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         VkAccelerationStructureGeometryKHR geometry{
@@ -243,7 +243,86 @@ static void create_top_level_acceleration_structures(VkContext *context, uint32_
             &scratch_buffers[i],
             &scratch_buffer_memories[i]
         );
+        // 创建实例缓冲区（按最大实例数分配）
+        VkDeviceSize instance_buffer_size = max_instance_count * sizeof(VkAccelerationStructureInstanceKHR);
+        create_buffer(
+            context,
+            instance_buffer_size,
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            &instance_buffers[i],
+            &instance_buffer_memories[i]
+        );
     }
+}
+
+// TODO: 将函数拆分为两部分：CPU 操作（上传数据）在命令缓冲区记录之前，GPU 操作（构建命令）在命令缓冲区中。
+static void build_top_level_acceleration_structure(VkCommandBuffer command_buffer, VkContext *context, const std::vector<Renderable> &renderables) {
+    if (renderables.empty()) { return; }
+
+    // 收集实例数据
+    std::vector<VkAccelerationStructureInstanceKHR> instances;
+    instances.reserve(renderables.size());
+
+    for (const Renderable &renderable : renderables) {
+        const Geometry &geometry = geometry_registry.entries[renderable.geometry_handle].geometry;
+
+        VkAccelerationStructureInstanceKHR instance = {};
+
+        // Vulkan 需要转置的变换矩阵
+        glm::mat4 transform_transposed = glm::transpose(renderable.model);
+        memcpy(instance.transform.matrix, glm::value_ptr(transform_transposed), sizeof(instance.transform.matrix));
+
+        instance.instanceCustomIndex = renderable.entity_id;
+        instance.mask = 0xFF;
+        instance.instanceShaderBindingTableRecordOffset = 0;
+        instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        instance.accelerationStructureReference = get_acceleration_structure_device_address(context, geometry.blas);
+
+        instances.push_back(instance);
+    }
+
+    // 上传实例数据（instance_buffers 已在初始化时按最大大小创建）
+    const VkDeviceSize instance_buffer_size = instances.size() * sizeof(VkAccelerationStructureInstanceKHR);
+    void *data;
+    vkMapMemory(context->device, instance_buffer_memories[frame_index], 0, instance_buffer_size, 0, &data);
+    memcpy(data, instances.data(), instance_buffer_size);
+    vkUnmapMemory(context->device, instance_buffer_memories[frame_index]);
+
+    // 准备 TLAS 几何体信息
+    VkAccelerationStructureGeometryInstancesDataKHR geometry_instances_data = {};
+    geometry_instances_data.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    geometry_instances_data.arrayOfPointers = VK_FALSE;
+    geometry_instances_data.data.deviceAddress = get_buffer_device_address(context, instance_buffers[frame_index]);
+
+    VkAccelerationStructureGeometryKHR geometry = {};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geometry.geometry.instances = geometry_instances_data;
+    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+    // 准备构建信息（TLAS 和 scratch 缓冲区已在初始化时按最大大小创建，无需检查大小）
+    VkAccelerationStructureBuildGeometryInfoKHR build_geometry_info = {};
+    build_geometry_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    build_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    build_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    build_geometry_info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    build_geometry_info.geometryCount = 1;
+    build_geometry_info.pGeometries = &geometry;
+
+    const uint32_t instance_count = instances.size();
+
+    // 更新构建信息
+    build_geometry_info.dstAccelerationStructure = tlas[frame_index];
+    build_geometry_info.scratchData.deviceAddress = get_buffer_device_address(context, scratch_buffers[frame_index]);
+
+    // 准备构建范围
+    VkAccelerationStructureBuildRangeInfoKHR build_range_info = {};
+    build_range_info.primitiveCount = instance_count;
+    const VkAccelerationStructureBuildRangeInfoKHR *build_range_infos[] = {&build_range_info};
+
+    // 构建 TLAS
+    context->vkCmdBuildAccelerationStructuresKHR(command_buffer, 1, &build_geometry_info, build_range_infos);
 }
 
 static void app_resize(AppState *app_state) {
@@ -548,6 +627,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         renderables.push_back({entity.entity_id, entity.geometry_handle, compute_model_matrix(entity.transform), entity.color});
     }
 
+    assert(renderables.size() <= MAX_TOP_LEVEL_ACCELERATION_STRUCTURE_INSTANCE_COUNT);
+
     // update descriptor set
     std::vector<VkWriteDescriptorSet> write_descriptor_sets = {};
     {
@@ -607,6 +688,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     command_buffer_begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     result = vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info);
     VK_CHECK(result);
+
+    build_top_level_acceleration_structure(command_buffer, &vk_context, renderables);
 
     // 转换 color image layout 为 COLOR_ATTACHMENT_OPTIMAL
     // 使用 BOTTOM_OF_PIPE 作为 src stage，表示之前所有操作（包括上一帧的 TRANSFER）都已完成，适合复用的资源（即使当前帧是第一次使用，也表示“之前没有操作”），更符合 in-flight 帧的语义
