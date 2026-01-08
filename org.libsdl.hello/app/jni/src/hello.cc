@@ -29,6 +29,10 @@ struct CameraData {
     glm::mat4 projection;
 };
 
+struct DirectionalLight {
+    glm::vec3 direction; // 光线方向（归一化）
+};
+
 struct Transform {
     glm::vec3 position;
     glm::quat orientation;
@@ -104,6 +108,11 @@ static CameraData camera_data[2] = {}; // [0] = scene camera, [1] = ui camera
 static std::vector<VkBuffer> camera_buffers = {}; // each in-flight frame has one camera buffer
 static std::vector<VkDeviceMemory> camera_buffer_memories = {}; // each in-flight frame has one camera buffer memory
 
+static DirectionalLight directional_light = {
+    .direction = glm::normalize(glm::vec3(0.0f, -1.0f, -1.0f)),
+};
+static std::vector<VkBuffer> light_buffers = {}; // each in-flight frame has one light buffer
+static std::vector<VkDeviceMemory> light_buffer_memories = {}; // each in-flight frame has one light buffer memory
 static std::vector<VkAccelerationStructureKHR> tlas = {}; // each in-flight frame has one tlas
 static std::vector<VkBuffer> tlas_buffers = {}; // each in-flight frame has one tlas buffer
 static std::vector<VkDeviceMemory> tlas_buffer_memories = {}; // each in-flight frame has one tlas buffer memory
@@ -126,7 +135,7 @@ static void create_descriptor_pools(VkContext *context) {
     descriptor_pools.resize(MAX_FRAMES_IN_FLIGHT);
 
     VkDescriptorPoolSize descriptor_pool_sizes[] = {
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}, // camera
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}, // camera + light (2 uniform buffers)
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, // picking storage buffer
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}, // acceleration structure
     };
@@ -434,6 +443,12 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         create_buffer(&vk_context, sizeof(CameraData) * 2, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &camera_buffers[i], &camera_buffer_memories[i]);
     }
 
+    light_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+    light_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_buffer(&vk_context, sizeof(DirectionalLight), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &light_buffers[i], &light_buffer_memories[i]);
+    }
+
     {
         GeometryData geometry_data = generate_triangle_geometry_data();
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
@@ -441,10 +456,17 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         entities.push_back({1, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});
     }
     {
-        GeometryData geometry_data = generate_plane_geometry_data(2.0f, 2);
+        GeometryData geometry_data = generate_plane_geometry_data(4.0f, 2);
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
         Transform transform = {glm::vec3(0.0f, 0.0f, 0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
         entities.push_back({2, geometry_handle, transform, glm::vec3(0.0f, 1.0f, 0.0f)});
+    }
+    {
+        GeometryData geometry_data = generate_cube_geometry_data(0.5f);
+        uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
+        // 位置在三角形左前方：三角形在 (0, 0.5, 0)，立方体在 (-1.0, 0.5, 1.0)
+        Transform transform = {glm::vec3(-1.0f, 0.5f, 1.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
+        entities.push_back({3, geometry_handle, transform, glm::vec3(0.0f, 0.0f, 1.0f)});  // 蓝色立方体
     }
 
     last_frame_time = SDL_GetTicksNS(); // 初始化第一帧的时间
@@ -603,6 +625,12 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     memcpy(p_data, camera_data, sizeof(CameraData) * 2);
     vkUnmapMemory(vk_context.device, camera_buffer_memories[frame_index]);
 
+    // 上传光源数据
+    p_data = nullptr;
+    vkMapMemory(vk_context.device, light_buffer_memories[frame_index], 0, sizeof(DirectionalLight), 0, &p_data);
+    memcpy(p_data, &directional_light, sizeof(DirectionalLight));
+    vkUnmapMemory(vk_context.device, light_buffer_memories[frame_index]);
+
     {
         // 初始化 picking storage buffer
         void *p_data = nullptr;
@@ -673,6 +701,20 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         write_descriptor_set.pNext = &tlas_write_descriptor_set;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
+    {
+        VkDescriptorBufferInfo light_buffer_info = {};
+        light_buffer_info.buffer = light_buffers[frame_index];
+        light_buffer_info.offset = 0;
+        light_buffer_info.range = sizeof(DirectionalLight);
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 3;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pBufferInfo = &light_buffer_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
     vkUpdateDescriptorSets(vk_context.device, write_descriptor_sets.size(), write_descriptor_sets.data(), 0, nullptr);
 
     // ========== GPU 资源获取阶段 ==========
@@ -739,7 +781,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         // 3. 动态状态（可以在 pipeline 绑定后设置，按使用频率和逻辑分组）
         set_viewport(command_buffer, 0, 0, app_state->render_width, app_state->render_height);
         set_scissor(command_buffer, 0, 0, app_state->render_width, app_state->render_height);
-        vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_NONE);
+        vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_BACK_BIT);
 
         // 4. 资源绑定（顶点和索引缓冲区，绘制数据）
         VkDeviceSize offsets[] = {0};
@@ -797,7 +839,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
             float scale_x = (float) app_state->render_width / (float) app_state->width;
             float scale_y = (float) app_state->render_height / (float) app_state->height;
             set_scissor(command_buffer, (uint32_t) (mouse_pos.x * scale_x), (uint32_t) (mouse_pos.y * scale_y), 1, 1);
-            vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_NONE);
+            vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_BACK_BIT);
 
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(command_buffer, 0, 1, &geometry.vertex_buffer, offsets);
@@ -895,6 +937,11 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
 {
     vkDeviceWaitIdle(vk_context.device);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        destroy_buffer(&vk_context, light_buffers[i], light_buffer_memories[i]);
+    }
+    light_buffers.clear();
+    light_buffer_memories.clear();
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         destroy_buffer(&vk_context, camera_buffers[i], camera_buffer_memories[i]);
     }

@@ -685,6 +685,7 @@ void create_descriptor_set_layout(VkContext *context) {
         {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr}, // camera
         {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // picking storage buffer
         {2, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // acceleration structure
+        {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // directional light
     };
 
     VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info = {};
@@ -740,6 +741,14 @@ void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology,
         vertex_input_attribute_description.location = 0;
         vertex_input_attribute_description.format = VK_FORMAT_R32G32B32_SFLOAT;
         vertex_input_attribute_description.offset = offsetof(Vertex, position);
+        vertex_input_attribute_descriptions.push_back(vertex_input_attribute_description);
+    }
+    {
+        VkVertexInputAttributeDescription vertex_input_attribute_description = {};
+        vertex_input_attribute_description.binding = 0;
+        vertex_input_attribute_description.location = 1;
+        vertex_input_attribute_description.format = VK_FORMAT_R32G32B32_SFLOAT;
+        vertex_input_attribute_description.offset = offsetof(Vertex, normal);
         vertex_input_attribute_descriptions.push_back(vertex_input_attribute_description);
     }
 

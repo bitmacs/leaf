@@ -11,10 +11,14 @@ GeometryData generate_triangle_geometry_data() {
     // 顶点3：右下 (330°) = (r*√3/2, -r/2, 0)
     const float r = 0.5f;  // 中心到顶点的距离
     const float sqrt3_half = 0.86602540378f;  // √3/2
+
+    // 计算法线：三角形在 XY 平面，法线指向 +Z 方向
+    const float normal[3] = {0.0f, 0.0f, 1.0f};
+
     geometry_data.vertices = {
-        {{ 0.0f,        r, 0.0f}},  // 顶部
-        {{-r * sqrt3_half, -r * 0.5f, 0.0f}},  // 左下
-        {{ r * sqrt3_half, -r * 0.5f, 0.0f}},  // 右下
+        {{ 0.0f,        r, 0.0f}, {normal[0], normal[1], normal[2]}},  // 顶部
+        {{-r * sqrt3_half, -r * 0.5f, 0.0f}, {normal[0], normal[1], normal[2]}},  // 左下
+        {{ r * sqrt3_half, -r * 0.5f, 0.0f}, {normal[0], normal[1], normal[2]}},  // 右下
     };
     geometry_data.indices = {0, 1, 2};
     geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -27,14 +31,16 @@ GeometryData generate_plane_geometry_data(float size, uint32_t segments) {
     float step = size / (float) segments;
     float half_size = size * 0.5f;
 
-    // 生成顶点
+    // 生成顶点（平面在 XZ 平面，法线指向 +Y 方向）
+    const float normal[3] = {0.0f, 1.0f, 0.0f};
     for (uint32_t z = 0; z <= segments; ++z) {
         for (uint32_t x = 0; x <= segments; ++x) {
             float x_pos = -half_size + x * step;
             float z_pos = -half_size + z * step;
 
             geometry_data.vertices.push_back({
-                {x_pos, 0.0f, z_pos}
+                {x_pos, 0.0f, z_pos},
+                {normal[0], normal[1], normal[2]}
             });
         }
     }
@@ -58,6 +64,88 @@ GeometryData generate_plane_geometry_data(float size, uint32_t segments) {
             geometry_data.indices.push_back(bottom_right);
         }
     }
+
+    geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    return geometry_data;
+}
+
+GeometryData generate_cube_geometry_data(float size) {
+    GeometryData geometry_data;
+    const float half = size * 0.5f;
+
+    // 立方体的 8 个顶点（中心在原点）
+    // 前四个顶点（Z = +half）：前面
+    // 后四个顶点（Z = -half）：后面
+    const float vertices[8][3] = {
+        // 前面（Z = +half）
+        {-half, -half,  half},  // 0: 左下前
+        { half, -half,  half},  // 1: 右下前
+        { half,  half,  half},  // 2: 右上前
+        {-half,  half,  half},  // 3: 左上前
+        // 后面（Z = -half）
+        {-half, -half, -half},  // 4: 左下后
+        { half, -half, -half},  // 5: 右下后
+        { half,  half, -half},  // 6: 右上后
+        {-half,  half, -half},  // 7: 左上后
+    };
+
+    // 立方体的 6 个面，每个面 2 个三角形
+    // 每个面的法线方向
+    const float normals[6][3] = {
+        { 0.0f,  0.0f,  1.0f},  // 前面 (+Z)
+        { 0.0f,  0.0f, -1.0f},  // 后面 (-Z)
+        { 1.0f,  0.0f,  0.0f},  // 右面 (+X)
+        {-1.0f,  0.0f,  0.0f},  // 左面 (-X)
+        { 0.0f,  1.0f,  0.0f},  // 上面 (+Y)
+        { 0.0f, -1.0f,  0.0f},  // 下面 (-Y)
+    };
+
+    // 前面 (Z = +half)
+    geometry_data.vertices.push_back({{vertices[0][0], vertices[0][1], vertices[0][2]}, {normals[0][0], normals[0][1], normals[0][2]}});
+    geometry_data.vertices.push_back({{vertices[1][0], vertices[1][1], vertices[1][2]}, {normals[0][0], normals[0][1], normals[0][2]}});
+    geometry_data.vertices.push_back({{vertices[2][0], vertices[2][1], vertices[2][2]}, {normals[0][0], normals[0][1], normals[0][2]}});
+    geometry_data.vertices.push_back({{vertices[3][0], vertices[3][1], vertices[3][2]}, {normals[0][0], normals[0][1], normals[0][2]}});
+    geometry_data.indices.insert(geometry_data.indices.end(), {0, 1, 2, 0, 2, 3});
+
+    // 后面 (Z = -half)
+    geometry_data.vertices.push_back({{vertices[5][0], vertices[5][1], vertices[5][2]}, {normals[1][0], normals[1][1], normals[1][2]}});
+    geometry_data.vertices.push_back({{vertices[4][0], vertices[4][1], vertices[4][2]}, {normals[1][0], normals[1][1], normals[1][2]}});
+    geometry_data.vertices.push_back({{vertices[7][0], vertices[7][1], vertices[7][2]}, {normals[1][0], normals[1][1], normals[1][2]}});
+    geometry_data.vertices.push_back({{vertices[6][0], vertices[6][1], vertices[6][2]}, {normals[1][0], normals[1][1], normals[1][2]}});
+    uint32_t base_index = geometry_data.vertices.size() - 4;
+    geometry_data.indices.insert(geometry_data.indices.end(), {base_index, base_index + 1, base_index + 2, base_index, base_index + 2, base_index + 3});
+
+    // 右面 (X = +half)
+    geometry_data.vertices.push_back({{vertices[1][0], vertices[1][1], vertices[1][2]}, {normals[2][0], normals[2][1], normals[2][2]}});
+    geometry_data.vertices.push_back({{vertices[5][0], vertices[5][1], vertices[5][2]}, {normals[2][0], normals[2][1], normals[2][2]}});
+    geometry_data.vertices.push_back({{vertices[6][0], vertices[6][1], vertices[6][2]}, {normals[2][0], normals[2][1], normals[2][2]}});
+    geometry_data.vertices.push_back({{vertices[2][0], vertices[2][1], vertices[2][2]}, {normals[2][0], normals[2][1], normals[2][2]}});
+    base_index = geometry_data.vertices.size() - 4;
+    geometry_data.indices.insert(geometry_data.indices.end(), {base_index, base_index + 1, base_index + 2, base_index, base_index + 2, base_index + 3});
+
+    // 左面 (X = -half)
+    geometry_data.vertices.push_back({{vertices[4][0], vertices[4][1], vertices[4][2]}, {normals[3][0], normals[3][1], normals[3][2]}});
+    geometry_data.vertices.push_back({{vertices[0][0], vertices[0][1], vertices[0][2]}, {normals[3][0], normals[3][1], normals[3][2]}});
+    geometry_data.vertices.push_back({{vertices[3][0], vertices[3][1], vertices[3][2]}, {normals[3][0], normals[3][1], normals[3][2]}});
+    geometry_data.vertices.push_back({{vertices[7][0], vertices[7][1], vertices[7][2]}, {normals[3][0], normals[3][1], normals[3][2]}});
+    base_index = geometry_data.vertices.size() - 4;
+    geometry_data.indices.insert(geometry_data.indices.end(), {base_index, base_index + 1, base_index + 2, base_index, base_index + 2, base_index + 3});
+
+    // 上面 (Y = +half)
+    geometry_data.vertices.push_back({{vertices[3][0], vertices[3][1], vertices[3][2]}, {normals[4][0], normals[4][1], normals[4][2]}});
+    geometry_data.vertices.push_back({{vertices[2][0], vertices[2][1], vertices[2][2]}, {normals[4][0], normals[4][1], normals[4][2]}});
+    geometry_data.vertices.push_back({{vertices[6][0], vertices[6][1], vertices[6][2]}, {normals[4][0], normals[4][1], normals[4][2]}});
+    geometry_data.vertices.push_back({{vertices[7][0], vertices[7][1], vertices[7][2]}, {normals[4][0], normals[4][1], normals[4][2]}});
+    base_index = geometry_data.vertices.size() - 4;
+    geometry_data.indices.insert(geometry_data.indices.end(), {base_index, base_index + 1, base_index + 2, base_index, base_index + 2, base_index + 3});
+
+    // 下面 (Y = -half)
+    geometry_data.vertices.push_back({{vertices[0][0], vertices[0][1], vertices[0][2]}, {normals[5][0], normals[5][1], normals[5][2]}});
+    geometry_data.vertices.push_back({{vertices[4][0], vertices[4][1], vertices[4][2]}, {normals[5][0], normals[5][1], normals[5][2]}});
+    geometry_data.vertices.push_back({{vertices[5][0], vertices[5][1], vertices[5][2]}, {normals[5][0], normals[5][1], normals[5][2]}});
+    geometry_data.vertices.push_back({{vertices[1][0], vertices[1][1], vertices[1][2]}, {normals[5][0], normals[5][1], normals[5][2]}});
+    base_index = geometry_data.vertices.size() - 4;
+    geometry_data.indices.insert(geometry_data.indices.end(), {base_index, base_index + 1, base_index + 2, base_index, base_index + 2, base_index + 3});
 
     geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     return geometry_data;
