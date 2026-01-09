@@ -219,7 +219,6 @@ void create_device(VkContext *context) {
     }
 
     std::vector<const char *> required_device_extensions;
-    std::vector<const char *> device_layers; // TODO
 
     required_device_extensions.push_back("VK_KHR_swapchain");
 
@@ -236,9 +235,8 @@ void create_device(VkContext *context) {
     // 4. 加速结构（依赖 buffer_device_address 和 deferred_host_operations）
     required_device_extensions.push_back("VK_KHR_acceleration_structure");
     required_device_extensions.push_back("VK_KHR_ray_query");
-    required_device_extensions.push_back("VK_KHR_pipeline_library");
-    required_device_extensions.push_back("VK_KHR_ray_tracing_pipeline"); // use vkCmdTraceRaysKHR
-    device_layers.push_back("VK_LAYER_KHRONOS_validation");
+    // required_device_extensions.push_back("VK_KHR_pipeline_library");
+    // required_device_extensions.push_back("VK_KHR_ray_tracing_pipeline"); // use vkCmdTraceRaysKHR
 
     {
         uint32_t extension_count = 0;
@@ -318,11 +316,17 @@ void create_device(VkContext *context) {
 
     // 启用特性（pNext 链顺序：基础特性在前，依赖特性在后）
 
+    // 4. Ray Query 特性（依赖 acceleration_structure，放在链的末尾）
+    VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
+    ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    ray_query_features.rayQuery = VK_TRUE;
+    ray_query_features.pNext = nullptr; // 链的末尾
+
     // 3. Acceleration Structure 特性（依赖 buffer_device_address，放在 buffer_device_address 之后）
     VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure_features = {};
     acceleration_structure_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     acceleration_structure_features.accelerationStructure = VK_TRUE;
-    acceleration_structure_features.pNext = nullptr; // 链的末尾
+    acceleration_structure_features.pNext = &ray_query_features;  // 链接到 ray query
 
     // 2. Buffer Device Address 特性（基础特性，acceleration_structure 依赖它，放在链的前面）
     VkPhysicalDeviceBufferDeviceAddressFeatures buffer_device_address_features = {};
@@ -343,8 +347,10 @@ void create_device(VkContext *context) {
     device_create_info.pQueueCreateInfos = queue_create_infos.data();
     device_create_info.enabledExtensionCount = required_device_extensions.size();
     device_create_info.ppEnabledExtensionNames = required_device_extensions.data();
-    device_create_info.enabledLayerCount = device_layers.size();
-    device_create_info.ppEnabledLayerNames = device_layers.data();
+    // Device layers are deprecated since Vulkan 1.3
+    // Instance layers automatically apply to all devices created from that instance
+    device_create_info.enabledLayerCount = 0;
+    device_create_info.ppEnabledLayerNames = nullptr;
     device_create_info.pEnabledFeatures = &device_features;
 
     VkResult result = vkCreateDevice(context->physical_device, &device_create_info, nullptr, &context->device);
@@ -383,8 +389,6 @@ void create_device(VkContext *context) {
     assert(context->vkGetAccelerationStructureDeviceAddressKHR && "vkGetAccelerationStructureDeviceAddressKHR not available");
     context->vkCmdBuildAccelerationStructuresKHR = LOAD_DEVICE_PROC_ADDR(context->device, vkCmdBuildAccelerationStructuresKHR);
     assert(context->vkCmdBuildAccelerationStructuresKHR && "vkCmdBuildAccelerationStructuresKHR not available");
-
-    // 加载 Debug Utils 函数（用于资源命名）
     context->vkSetDebugUtilsObjectNameEXT = LOAD_DEVICE_PROC_ADDR(context->device, vkSetDebugUtilsObjectNameEXT);
     assert(context->vkSetDebugUtilsObjectNameEXT && "vkSetDebugUtilsObjectNameEXT not available");
 }
@@ -902,6 +906,14 @@ void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image
     image_barrier.subresourceRange.baseArrayLayer = 0;
     image_barrier.subresourceRange.layerCount = 1;
     vkCmdPipelineBarrier(command_buffer, src_stage_flags, dst_stage_flags, 0, 0, nullptr, 0, nullptr, 1, &image_barrier);
+}
+
+void record_pipeline_memory_barrier(VkCommandBuffer command_buffer, VkPipelineStageFlags src_stage_flags, VkPipelineStageFlags dst_stage_flags, VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask) {
+    VkMemoryBarrier memory_barrier = {};
+    memory_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memory_barrier.srcAccessMask = src_access_mask;
+    memory_barrier.dstAccessMask = dst_access_mask;
+    vkCmdPipelineBarrier(command_buffer, src_stage_flags, dst_stage_flags, 0, 1, &memory_barrier, 0, nullptr, 0, nullptr);
 }
 
 void blit_image(VkCommandBuffer command_buffer, VkImage src_image, VkImage dst_image, uint32_t src_width, uint32_t src_height, uint32_t dst_width, uint32_t dst_height) {

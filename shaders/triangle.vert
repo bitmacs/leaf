@@ -1,4 +1,4 @@
-#version 440 core
+#version 460 core
 #extension GL_EXT_debug_printf : enable
 
 #include "types.glsl"
@@ -20,12 +20,15 @@ layout (push_constant) uniform PushConstants {
 layout (location = 0) out VS_OUT {
     vec3 color;
     vec3 normal; // in world space
+    vec3 position; // in world space
 } vs_out;
 
 void main() {
     // debugPrintfEXT("vertex index: %d", gl_VertexIndex);
-    gl_Position =  cameras[push_constants.camera_index].projection * cameras[push_constants.camera_index].view * push_constants.model * vec4(position, 1.0);
+    vec4 world_pos = push_constants.model * vec4(position, 1.0);
+    gl_Position =  cameras[push_constants.camera_index].projection * cameras[push_constants.camera_index].view * world_pos;
     vs_out.color = push_constants.color;
+    vs_out.position = world_pos.xyz;
 
     // 将法线从模型空间转换到世界空间（只考虑旋转和缩放，不考虑平移）
     mat3 normal_matrix = mat3(transpose(inverse(push_constants.model)));

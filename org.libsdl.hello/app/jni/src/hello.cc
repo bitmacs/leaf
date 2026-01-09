@@ -4,6 +4,9 @@
 #include "geometries.h"
 #include "tasks.h"
 #include "vk.h"
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <SDL3/SDL.h>
@@ -103,6 +106,7 @@ static float camera_orbit_radius = 8.0f;
 static bool is_dragging = false;
 static glm::vec2 prev_mouse_pos = glm::vec2(0.0f);
 static glm::vec2 mouse_pos = glm::vec2(0.0f);
+static double total_time = 0.0;  // 累计总时间，用于动画
 
 static CameraData camera_data[2] = {}; // [0] = scene camera, [1] = ui camera
 static std::vector<VkBuffer> camera_buffers = {}; // each in-flight frame has one camera buffer
@@ -243,7 +247,7 @@ static void create_top_level_acceleration_structures(VkContext *context, uint32_
         };
         VkResult result = context->vkCreateAccelerationStructureKHR(context->device, &create_info, nullptr, &tlas[i]);
         assert(result == VK_SUCCESS);
-        VkDeviceSize scratch_buffer_size = std::max(build_sizes_info.buildScratchSize, build_sizes_info.updateScratchSize);
+        VkDeviceSize scratch_buffer_size = build_sizes_info.buildScratchSize;
         create_buffer(
             context,
             scratch_buffer_size,
@@ -265,6 +269,30 @@ static void create_top_level_acceleration_structures(VkContext *context, uint32_
     }
 }
 
+static VkTransformMatrixKHR to_vk_transform_matrix(const glm::mat4 &m) {
+    VkTransformMatrixKHR out{};
+
+    // VkTransformMatrixKHR 是 row-major
+    // glm::mat4 是 column-major (m[col][row])
+
+    out.matrix[0][0] = m[0][0];
+    out.matrix[0][1] = m[1][0];
+    out.matrix[0][2] = m[2][0];
+    out.matrix[0][3] = m[3][0];
+
+    out.matrix[1][0] = m[0][1];
+    out.matrix[1][1] = m[1][1];
+    out.matrix[1][2] = m[2][1];
+    out.matrix[1][3] = m[3][1];
+
+    out.matrix[2][0] = m[0][2];
+    out.matrix[2][1] = m[1][2];
+    out.matrix[2][2] = m[2][2];
+    out.matrix[2][3] = m[3][2];
+
+    return out;
+}
+
 // TODO: 将函数拆分为两部分：CPU 操作（上传数据）在命令缓冲区记录之前，GPU 操作（构建命令）在命令缓冲区中。
 static void build_top_level_acceleration_structure(VkCommandBuffer command_buffer, VkContext *context, const std::vector<Renderable> &renderables) {
     if (renderables.empty()) { return; }
@@ -279,8 +307,9 @@ static void build_top_level_acceleration_structure(VkCommandBuffer command_buffe
         VkAccelerationStructureInstanceKHR instance = {};
 
         // Vulkan 需要转置的变换矩阵
-        glm::mat4 transform_transposed = glm::transpose(renderable.model);
-        memcpy(instance.transform.matrix, glm::value_ptr(transform_transposed), sizeof(instance.transform.matrix));
+        // glm::mat4 transform_transposed = glm::transpose(renderable.model);
+        // memcpy(instance.transform.matrix, glm::value_ptr(transform_transposed), sizeof(instance.transform.matrix));
+        instance.transform = to_vk_transform_matrix(renderable.model);
 
         instance.instanceCustomIndex = renderable.entity_id;
         instance.mask = 0xFF;
@@ -310,7 +339,7 @@ static void build_top_level_acceleration_structure(VkCommandBuffer command_buffe
     geometry.geometry.instances = geometry_instances_data;
     geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
 
-    // 准备构建信息（TLAS 和 scratch 缓冲区已在初始化时按最大大小创建，无需检查大小）
+    // 准备构建信息（每帧都使用 BUILD 模式）
     VkAccelerationStructureBuildGeometryInfoKHR build_geometry_info = {};
     build_geometry_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     build_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
@@ -330,7 +359,7 @@ static void build_top_level_acceleration_structure(VkCommandBuffer command_buffe
     build_range_info.primitiveCount = instance_count;
     const VkAccelerationStructureBuildRangeInfoKHR *build_range_infos[] = {&build_range_info};
 
-    // 构建 TLAS
+    // 构建 TLAS（每帧都完全重建）
     context->vkCmdBuildAccelerationStructuresKHR(command_buffer, 1, &build_geometry_info, build_range_infos);
 }
 
@@ -449,6 +478,9 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         create_buffer(&vk_context, sizeof(DirectionalLight), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &light_buffers[i], &light_buffer_memories[i]);
     }
 
+    camera.position = glm::vec3(4.34f, 3.42f, 5.78f);
+    camera.orientation = glm::quat(0.93f, -0.21f, 0.31f, 0.07f);
+
     {
         GeometryData geometry_data = generate_triangle_geometry_data();
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
@@ -467,6 +499,13 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         // 位置在三角形左前方：三角形在 (0, 0.5, 0)，立方体在 (-1.0, 0.5, 1.0)
         Transform transform = {glm::vec3(-1.0f, 0.5f, 1.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
         entities.push_back({3, geometry_handle, transform, glm::vec3(0.0f, 0.0f, 1.0f)});  // 蓝色立方体
+    }
+    {
+        GeometryData geometry_data = generate_sphere_geometry_data(0.25f, 32);  // 半径0.25，32段细分
+        uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
+        // 位置在三角形前方、立方体的对面：三角形在 (0, 0.5, 0)，立方体在 (-1.0, 0.5, 1.0)，球体在 (1.0, 0.5, 1.0)
+        Transform transform = {glm::vec3(1.0f, 0.5f, 1.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
+        entities.push_back({4, geometry_handle, transform, glm::vec3(1.0f, 1.0f, 0.0f)});  // 黄色球体
     }
 
     last_frame_time = SDL_GetTicksNS(); // 初始化第一帧的时间
@@ -530,6 +569,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     Uint64 delta_time_ns = current_time - last_frame_time;
     double delta_time = (double) delta_time_ns / 1e9;  // 转换为秒
     last_frame_time = current_time;
+    total_time += delta_time;  // 累计总时间
 
     // SDL_Log("Delta time: %.6f ms (%.2f FPS)", delta_time * 1000, 1.0 / delta_time);
 
@@ -646,6 +686,41 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     // Update scene graph
     // Prepare render data (uniforms, descriptors, etc.)
 
+    // 更新三角形上下振荡
+    for (Entity &entity: entities) {
+        if (entity.entity_id == 1) {  // 三角形的entity_id是1
+            const float base_y = 0.6f;  // 基础Y坐标（提高以确保底部不低于0）
+            const float amplitude = 0.3f;  // 振荡幅度
+            const float frequency = 0.1f;  // 振荡频率（Hz），节奏类似立方体旋转（0.5弧度/秒 ≈ 0.08Hz）
+            float oscillation = amplitude * sinf((float) total_time * frequency * 2.0f * 3.14159f);
+            entity.transform.position.y = base_y + oscillation;
+            break;
+        }
+    }
+
+    // 更新立方体旋转（绕Y轴缓慢旋转）
+    for (Entity &entity: entities) {
+        if (entity.entity_id == 3) {  // 立方体的entity_id是3
+            const float rotation_speed = 0.5f;  // 弧度/秒
+            float rotation_angle = (float) delta_time * rotation_speed;
+            glm::quat rotation = glm::angleAxis(rotation_angle, glm::vec3(0.0f, 1.0f, 0.0f));
+            entity.transform.orientation = glm::normalize(rotation * entity.transform.orientation);
+            break;
+        }
+    }
+
+    // 更新球体前后振荡
+    for (Entity &entity: entities) {
+        if (entity.entity_id == 4) {  // 球体的entity_id是4
+            const float base_z = 1.0f;  // 基础Z坐标
+            const float amplitude = 0.5f;  // 振荡幅度
+            const float frequency = 0.1f;  // 振荡频率（Hz），节奏类似立方体旋转
+            float oscillation = amplitude * sinf((float) total_time * frequency * 2.0f * 3.14159f);
+            entity.transform.position.z = base_z + oscillation;
+            break;
+        }
+    }
+
     // collect renderables
     std::vector<Renderable> renderables = {};
     for (const Entity &entity : entities) {
@@ -755,9 +830,17 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
                                   VK_IMAGE_LAYOUT_UNDEFINED,
                                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
-    // VkClearColorValue clear_color_value = {.float32 = {0.5f, 0.8f, 1.0f, 1.0f}}; // 轻松活泼的天空蓝色 (RGB: 128, 204, 255)
+    // 确保 TLAS 构建完成，对 fragment shader 可见（用于 ray query）
+    // 放在 begin_rendering 之前，使得图像布局转换可以与 TLAS 构建并行执行，最大化并行度
+    record_pipeline_memory_barrier(command_buffer,
+                                  VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                  VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                                  VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+
+    VkClearColorValue clear_color_value = {.float32 = {0.5f, 0.8f, 1.0f, 1.0f}}; // 轻松活泼的天空蓝色 (RGB: 128, 204, 255)
     // VkClearColorValue clear_color_value = {.float32 = {0.5f, 1.0f, 0.8f}}; // 薄荷绿
-    VkClearColorValue clear_color_value = {.float32 = {0.98f, 0.92f, 0.95f, 1.0f}}; // 樱花粉 (RGB: 250, 235, 242)
+    // VkClearColorValue clear_color_value = {.float32 = {0.98f, 0.92f, 0.95f, 1.0f}}; // 樱花粉 (RGB: 250, 235, 242)
     VkClearDepthStencilValue clear_depth_stencil_value = {.depth = 1.0f, .stencil = 0};
     // 使用渲染尺寸
     begin_rendering(&vk_context, command_buffer, color_image_views[frame_index], &clear_color_value, depth_image_views[frame_index], &clear_depth_stencil_value, app_state->render_width, app_state->render_height);
@@ -781,7 +864,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         // 3. 动态状态（可以在 pipeline 绑定后设置，按使用频率和逻辑分组）
         set_viewport(command_buffer, 0, 0, app_state->render_width, app_state->render_height);
         set_scissor(command_buffer, 0, 0, app_state->render_width, app_state->render_height);
-        vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_BACK_BIT);
+        vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_NONE);
 
         // 4. 资源绑定（顶点和索引缓冲区，绘制数据）
         VkDeviceSize offsets[] = {0};
@@ -839,7 +922,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
             float scale_x = (float) app_state->render_width / (float) app_state->width;
             float scale_y = (float) app_state->render_height / (float) app_state->height;
             set_scissor(command_buffer, (uint32_t) (mouse_pos.x * scale_x), (uint32_t) (mouse_pos.y * scale_y), 1, 1);
-            vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_BACK_BIT);
+            vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_NONE);
 
             VkDeviceSize offsets[] = {0};
             vkCmdBindVertexBuffers(command_buffer, 0, 1, &geometry.vertex_buffer, offsets);

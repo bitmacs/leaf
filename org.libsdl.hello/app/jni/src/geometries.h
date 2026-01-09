@@ -13,6 +13,7 @@ struct GeometryData {
 GeometryData generate_triangle_geometry_data();
 GeometryData generate_plane_geometry_data(float size, uint32_t segments);
 GeometryData generate_cube_geometry_data(float size);
+GeometryData generate_sphere_geometry_data(float radius, uint32_t segments);
 
 #define MAX_GEOMETRIES 1024
 

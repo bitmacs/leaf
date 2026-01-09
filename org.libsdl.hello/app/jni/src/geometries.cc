@@ -1,5 +1,6 @@
 #include "geometries.h"
 #include <cassert>
+#include <cmath>
 #include <mutex>
 
 GeometryData generate_triangle_geometry_data() {
@@ -146,6 +147,61 @@ GeometryData generate_cube_geometry_data(float size) {
     geometry_data.vertices.push_back({{vertices[1][0], vertices[1][1], vertices[1][2]}, {normals[5][0], normals[5][1], normals[5][2]}});
     base_index = geometry_data.vertices.size() - 4;
     geometry_data.indices.insert(geometry_data.indices.end(), {base_index, base_index + 1, base_index + 2, base_index, base_index + 2, base_index + 3});
+
+    geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    return geometry_data;
+}
+
+GeometryData generate_sphere_geometry_data(float radius, uint32_t segments) {
+    GeometryData geometry_data;
+
+    // 使用球坐标系生成球体顶点
+    // segments 控制细分程度（经度和纬度的分段数）
+    const uint32_t longitude_segments = segments;
+    const uint32_t latitude_segments = segments;
+
+    // 生成顶点
+    for (uint32_t lat = 0; lat <= latitude_segments; ++lat) {
+        float theta = 3.14159f * lat / latitude_segments;  // 纬度角 [0, π]
+        float sin_theta = sinf(theta);
+        float cos_theta = cosf(theta);
+
+        for (uint32_t lon = 0; lon <= longitude_segments; ++lon) {
+            float phi = 2.0f * 3.14159f * lon / longitude_segments;  // 经度角 [0, 2π]
+            float sin_phi = sinf(phi);
+            float cos_phi = cosf(phi);
+
+            // 球面上的点
+            float x = radius * sin_theta * cos_phi;
+            float y = radius * cos_theta;
+            float z = radius * sin_theta * sin_phi;
+
+            // 法线（从球心指向表面的单位向量）
+            float nx = sin_theta * cos_phi;
+            float ny = cos_theta;
+            float nz = sin_theta * sin_phi;
+
+            geometry_data.vertices.push_back({{x, y, z}, {nx, ny, nz}});
+        }
+    }
+
+    // 生成索引（每个四边形分成两个三角形）
+    for (uint32_t lat = 0; lat < latitude_segments; ++lat) {
+        for (uint32_t lon = 0; lon < longitude_segments; ++lon) {
+            uint32_t first = lat * (longitude_segments + 1) + lon;
+            uint32_t second = first + longitude_segments + 1;
+
+            // 第一个三角形
+            geometry_data.indices.push_back(first);
+            geometry_data.indices.push_back(second);
+            geometry_data.indices.push_back(first + 1);
+
+            // 第二个三角形
+            geometry_data.indices.push_back(second);
+            geometry_data.indices.push_back(second + 1);
+            geometry_data.indices.push_back(first + 1);
+        }
+    }
 
     geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     return geometry_data;
