@@ -30,6 +30,7 @@ struct PushConstants {
 };
 
 struct PathTracingPushConstants {
+    uint32_t camera_index;
 };
 
 struct PipelineKey {

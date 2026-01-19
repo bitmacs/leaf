@@ -898,6 +898,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
 
     PathTracingPushConstants path_tracing_push_constants = {};
+    path_tracing_push_constants.camera_index = 0;
     vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
 
     uint32_t group_count_x = (app_state->render_width + 7) / 8;
