@@ -851,6 +851,35 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     build_top_level_acceleration_structure(command_buffer, &vk_context, renderables);
 
+    // 转换路径追踪图像 layout 为 GENERAL
+    record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+
+    // 确保 TLAS 构建完成，对 path tracing compute shader 可见
+    record_pipeline_memory_barrier(command_buffer,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+        VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
+
+    PathTracingPushConstants path_tracing_push_constants = {};
+    path_tracing_push_constants.camera_index = 0;
+
+    vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
+
+    uint32_t group_count_x = (app_state->render_width + 7) / 8;
+    uint32_t group_count_y = (app_state->render_height + 7) / 8;
+    vkCmdDispatch(command_buffer, group_count_x, group_count_y, 1);
+
     // 转换 color image layout 为 COLOR_ATTACHMENT_OPTIMAL
     // 使用 BOTTOM_OF_PIPE 作为 src stage，表示之前所有操作（包括上一帧的 TRANSFER）都已完成，适合复用的资源（即使当前帧是第一次使用，也表示“之前没有操作”），更符合 in-flight 帧的语义
     record_pipeline_image_barrier(command_buffer, color_images[frame_index],
@@ -881,26 +910,6 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
                                   VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                                   VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
-    // 转换路径追踪图像 layout 为 GENERAL
-    record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL);
-
-    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline);
-    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
-
-    PathTracingPushConstants path_tracing_push_constants = {};
-    path_tracing_push_constants.camera_index = 0;
-    vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
-
-    uint32_t group_count_x = (app_state->render_width + 7) / 8;
-    uint32_t group_count_y = (app_state->render_height + 7) / 8;
-    vkCmdDispatch(command_buffer, group_count_x, group_count_y, 1);
     VkClearColorValue clear_color_value = {.float32 = {0.5f, 0.8f, 1.0f, 1.0f}}; // 轻松活泼的天空蓝色 (RGB: 128, 204, 255)
     // VkClearColorValue clear_color_value = {.float32 = {0.5f, 1.0f, 0.8f}}; // 薄荷绿
     // VkClearColorValue clear_color_value = {.float32 = {0.98f, 0.92f, 0.95f, 1.0f}}; // 樱花粉 (RGB: 250, 235, 242)
