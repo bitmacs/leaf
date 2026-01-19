@@ -64,14 +64,13 @@ struct PickingResult {
 struct AppState {
     uint32_t width; // 窗口宽度（swap chain 尺寸）
     uint32_t height; // 窗口高度（swap chain 尺寸）
-    uint32_t render_width; // 渲染宽度（窗口的 scale_factor 倍）
-    uint32_t render_height; // 渲染高度（窗口的 scale_factor 倍）
+    uint32_t render_width; // 渲染宽度
+    uint32_t render_height; // 渲染高度
 };
 
 static TaskSystem task_system = {};
 static GeometryRegistry geometry_registry = {};
 static SDL_Window *window = NULL;
-static float scale_factor = 1.0f;
 static bool window_has_focus = true; // 窗口焦点状态
 static bool need_recreate_surface = false; // 是否需要重新创建 surface
 
@@ -108,7 +107,7 @@ static std::vector<PickingState> picking_states = {}; // each in-flight frame ha
 
 static Camera camera = {};
 static glm::vec3 camera_orbit_target = glm::vec3(0.0f, 0.0f, 0.0f);
-static float camera_orbit_radius = 8.0f;
+static float camera_orbit_radius = 6.0f;
 static bool is_dragging = false;
 static glm::vec2 prev_mouse_pos = glm::vec2(0.0f);
 static glm::vec2 mouse_pos = glm::vec2(0.0f);
@@ -401,9 +400,8 @@ static void app_resize(AppState *app_state) {
     app_state->width = (uint32_t) width;
     app_state->height = (uint32_t) height;
 
-    // 更新渲染尺寸（窗口的 scale_factor 倍）
-    app_state->render_width = (uint32_t) (app_state->width * scale_factor);
-    app_state->render_height = (uint32_t) (app_state->height * scale_factor);
+    app_state->render_width = app_state->width;
+    app_state->render_height = app_state->height / 2;
 
     picking_states.clear();
     for (FrameState &frame_state : frame_states) {
@@ -444,9 +442,8 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     app_state->width = (uint32_t) usable_bounds.w;
     app_state->height = (uint32_t) usable_bounds.h;
 
-    // 渲染尺寸为屏幕尺寸的 scale_factor 倍
-    app_state->render_width = (uint32_t) (app_state->width * scale_factor);
-    app_state->render_height = (uint32_t) (app_state->height * scale_factor);
+    app_state->render_width = app_state->width;
+    app_state->render_height = app_state->height / 2;
 
     *pp_app_state = app_state;
 
@@ -1035,8 +1032,10 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
                                       VK_IMAGE_LAYOUT_UNDEFINED, // acquire 后通常是 UNDEFINED
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-        // Blit 时从渲染尺寸缩放到屏幕尺寸，保持宽高比并居中
-        blit_image(command_buffer, color_images[frame_index], vk_context.swap_chain_images[image_index], app_state->render_width, app_state->render_height, app_state->width, app_state->height);
+        // Blit 渲染结果到屏幕下半部分（水平居中，底部对齐，保持原始尺寸）
+        blit_image(command_buffer, color_images[frame_index], vk_context.swap_chain_images[image_index],
+                   0, 0, app_state->render_width, app_state->render_height, // 源区域：整个渲染图像
+                   (app_state->width - app_state->render_width) / 2, app_state->height - app_state->render_height, app_state->render_width, app_state->render_height); // 目标区域：屏幕下半部分
 
         // 转换 swap chain image layout 为 PRESENT_SRC
         record_pipeline_image_barrier(command_buffer, vk_context.swap_chain_images[image_index],

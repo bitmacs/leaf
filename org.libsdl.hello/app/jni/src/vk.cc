@@ -956,32 +956,21 @@ void record_pipeline_memory_barrier(VkCommandBuffer command_buffer, VkPipelineSt
     vkCmdPipelineBarrier(command_buffer, src_stage_flags, dst_stage_flags, 0, 1, &memory_barrier, 0, nullptr, 0, nullptr);
 }
 
-void blit_image(VkCommandBuffer command_buffer, VkImage src_image, VkImage dst_image, uint32_t src_width, uint32_t src_height, uint32_t dst_width, uint32_t dst_height) {
-    // 计算缩放比例，保持宽高比
-    float scale_x = (float) dst_width / (float) src_width;
-    float scale_y = (float) dst_height / (float) src_height;
-    float scale = std::min(scale_x, scale_y); // 使用较小的比例，保持宽高比
-
-    // 计算目标区域（居中）
-    uint32_t scaled_width = (uint32_t) (src_width * scale);
-    uint32_t scaled_height = (uint32_t) (src_height * scale);
-    int32_t offset_x = (dst_width - scaled_width) / 2;
-    int32_t offset_y = (dst_height - scaled_height) / 2;
-
+void blit_image(VkCommandBuffer command_buffer, VkImage src_image, VkImage dst_image, uint32_t src_offset_x, uint32_t src_offset_y, uint32_t src_width, uint32_t src_height, uint32_t dst_offset_x, uint32_t dst_offset_y, uint32_t dst_width, uint32_t dst_height) {
     VkImageBlit blit_region = {};
     blit_region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit_region.srcSubresource.mipLevel = 0;
     blit_region.srcSubresource.baseArrayLayer = 0;
     blit_region.srcSubresource.layerCount = 1;
-    blit_region.srcOffsets[0] = {0, 0, 0};
-    blit_region.srcOffsets[1] = {(int32_t) src_width, (int32_t) src_height, 1};
+    blit_region.srcOffsets[0] = {(int32_t) src_offset_x, (int32_t) src_offset_y, 0};
+    blit_region.srcOffsets[1] = {(int32_t) (src_offset_x + src_width), (int32_t) (src_offset_y + src_height), 1};
 
     blit_region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blit_region.dstSubresource.mipLevel = 0;
     blit_region.dstSubresource.baseArrayLayer = 0;
     blit_region.dstSubresource.layerCount = 1;
-    blit_region.dstOffsets[0] = {offset_x, offset_y, 0};
-    blit_region.dstOffsets[1] = {offset_x + (int32_t) scaled_width, offset_y + (int32_t) scaled_height, 1};
+    blit_region.dstOffsets[0] = {(int32_t) dst_offset_x, (int32_t) dst_offset_y, 0};
+    blit_region.dstOffsets[1] = {(int32_t) (dst_offset_x + dst_width), (int32_t) (dst_offset_y + dst_height), 1};
 
     vkCmdBlitImage(command_buffer, src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit_region, VK_FILTER_NEAREST);
 }
