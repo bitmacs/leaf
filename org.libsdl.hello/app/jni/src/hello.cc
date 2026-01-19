@@ -148,6 +148,7 @@ static void create_descriptor_pools(VkContext *context) {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}, // camera + light (2 uniform buffers)
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, // picking storage buffer
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}, // acceleration structure
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}, // path tracing output image
     };
 
     VkDescriptorPoolCreateInfo descriptor_pool_create_info = {};
@@ -822,6 +823,19 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         write_descriptor_set.pBufferInfo = &light_buffer_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
+    {
+        VkDescriptorImageInfo path_tracing_image_info = {};
+        path_tracing_image_info.imageView = path_tracing_image_views[frame_index];
+        path_tracing_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 4;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &path_tracing_image_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
     vkUpdateDescriptorSets(vk_context.device, write_descriptor_sets.size(), write_descriptor_sets.data(), 0, nullptr);
 
     // ========== GPU 资源获取阶段 ==========
@@ -870,6 +884,25 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
                                   VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
                                   VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
+    // 转换路径追踪图像 layout 为 GENERAL
+    record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
+
+    PathTracingPushConstants path_tracing_push_constants = {};
+    vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
+
+    uint32_t group_count_x = (app_state->render_width + 7) / 8;
+    uint32_t group_count_y = (app_state->render_height + 7) / 8;
+    vkCmdDispatch(command_buffer, group_count_x, group_count_y, 1);
     VkClearColorValue clear_color_value = {.float32 = {0.5f, 0.8f, 1.0f, 1.0f}}; // 轻松活泼的天空蓝色 (RGB: 128, 204, 255)
     // VkClearColorValue clear_color_value = {.float32 = {0.5f, 1.0f, 0.8f}}; // 薄荷绿
     // VkClearColorValue clear_color_value = {.float32 = {0.98f, 0.92f, 0.95f, 1.0f}}; // 樱花粉 (RGB: 250, 235, 242)
