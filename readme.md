@@ -7,6 +7,9 @@ geometry / mesh abstraction
 dynamic rendering
 ray-traced hard shadow
 
+# doing
+monte carlo path tracing
+
 # todo
 ReSTIR GI
 gizmo

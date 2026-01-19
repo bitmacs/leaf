@@ -78,6 +78,7 @@ static bool need_recreate_surface = false; // 是否需要重新创建 surface
 static VkContext vk_context = {};
 static uint64_t last_frame_time = 0;
 static uint32_t frame_index = 0;
+static uint32_t frame_count = 0; // 全局帧计数
 
 static std::vector<VkFence> fences = {}; // each in-flight frame has a fence
 static std::vector<VkCommandBuffer> command_buffers = {}; // each in-flight frame has one command buffer
@@ -96,6 +97,11 @@ static std::vector<VkImageView> color_image_views;
 
 static std::vector<VkBuffer> picking_storage_buffers = {}; // each in-flight frame has one picking storage buffer
 static std::vector<VkDeviceMemory> picking_storage_buffer_memories = {}; // each in-flight frame has one picking storage buffer memory
+
+// 路径追踪输出图像（每个 in-flight 帧一份）
+static std::vector<VkImage> path_tracing_images = {};
+static std::vector<VkDeviceMemory> path_tracing_image_memories = {};
+static std::vector<VkImageView> path_tracing_image_views = {};
 
 static std::vector<FrameState> frame_states = {}; // each in-flight frame has one frame state
 static std::vector<PickingState> picking_states = {}; // each in-flight frame has one picking state
@@ -189,6 +195,28 @@ static void destroy_framebuffers() {
     depth_images.clear();
     color_image_memories.clear();
     depth_image_memories.clear();
+}
+
+static void create_path_tracing_images(VkContext *context, AppState *app_state) {
+    path_tracing_images.resize(MAX_FRAMES_IN_FLIGHT);
+    path_tracing_image_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    path_tracing_image_views.resize(MAX_FRAMES_IN_FLIGHT);
+    char name[100];
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_image(&vk_context, VK_FORMAT_R8G8B8A8_UINT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &path_tracing_images[i], &path_tracing_image_memories[i]);
+        snprintf(name, sizeof(name), "path_tracing_image_%d", i);
+        create_image_view(&vk_context, path_tracing_images[i], VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_ASPECT_COLOR_BIT, &path_tracing_image_views[i], name);
+    }
+}
+
+static void destroy_path_tracing_images(VkContext *context) {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkDestroyImageView(context->device, path_tracing_image_views[i], nullptr);
+        destroy_image(context, path_tracing_images[i], path_tracing_image_memories[i]);
+    }
+    path_tracing_image_views.clear();
+    path_tracing_images.clear();
+    path_tracing_image_memories.clear();
 }
 
 static void create_top_level_acceleration_structures(VkContext *context, uint32_t max_instance_count) {
@@ -384,12 +412,14 @@ static void app_resize(AppState *app_state) {
         frame_state.geometry_handles.clear();
     }
     frame_states.clear();
+    destroy_path_tracing_images(&vk_context);
     destroy_framebuffers();
     destroy_swap_chain(&vk_context);
     SDL_Vulkan_DestroySurface(vk_context.instance, vk_context.surface, nullptr);
     create_vulkan_surface(&vk_context, window);
     create_swap_chain(&vk_context, app_state->width, app_state->height);
     create_framebuffers(app_state);
+    create_path_tracing_images(&vk_context, app_state);
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
     picking_states.resize(MAX_FRAMES_IN_FLIGHT, PICKING_STATE_NONE);
     frame_index = 0; // reset frame index
@@ -456,6 +486,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     allocate_command_buffers(&vk_context, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
 
     create_framebuffers(app_state);
+    create_path_tracing_images(&vk_context, app_state);
     picking_storage_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     picking_storage_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -1012,6 +1043,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     VK_CHECK(result);
 
     frame_index = (frame_index + 1) % MAX_FRAMES_IN_FLIGHT;
+    frame_count++;
 
     return SDL_APP_CONTINUE;
 }
@@ -1060,6 +1092,7 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     }
     picking_storage_buffers.clear();
     picking_storage_buffer_memories.clear();
+    destroy_path_tracing_images(&vk_context);
     destroy_framebuffers();
     vkFreeCommandBuffers(vk_context.device, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());
     command_buffers.clear();

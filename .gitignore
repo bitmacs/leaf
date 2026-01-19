@@ -1,5 +1,6 @@
 build/
 local.properties
+.cache/
 .gradle/
 .cxx/
 .idea/
