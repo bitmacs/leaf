@@ -542,10 +542,33 @@ void create_command_pool(VkContext *context) {
     assert(result == VK_SUCCESS);
 }
 
+void create_compute_pipeline(VkContext *context, const char *shader_name) {
+    VkShaderModule shader_module;
+    std::string shader_filepath = std::string("shaders/") + std::string(shader_name) + ".comp.spv";
+    create_shader_module(context, shader_filepath.c_str(), &shader_module);
+
+    VkPipelineShaderStageCreateInfo shader_stage_create_info = {};
+    shader_stage_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stage_create_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    shader_stage_create_info.module = shader_module;
+    shader_stage_create_info.pName = "main";
+
+    VkComputePipelineCreateInfo pipeline_create_info = {};
+    pipeline_create_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipeline_create_info.stage = shader_stage_create_info;
+    pipeline_create_info.layout = context->compute_pipeline_layout;
+
+    VkResult result = vkCreateComputePipelines(context->device, nullptr, 1, &pipeline_create_info, nullptr, &context->compute_pipeline);
+    assert(result == VK_SUCCESS);
+
+    vkDestroyShaderModule(context->device, shader_module, nullptr);
+}
+
 void create_pipelines(VkContext *context) {
     // shader 名称（不包含路径和扩展名），函数会自动添加 shaders/ 前缀和 .vert.spv/.frag.spv 后缀
     create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, true, context->surface_format, context->depth_image_format, "triangle", "triangle");
     create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, false, VK_FORMAT_UNDEFINED, context->depth_image_format, "picking", "picking");
+    create_compute_pipeline(context, "path_tracing");
 }
 
 void allocate_command_buffers(VkContext *context, VkCommandPool command_pool, uint32_t count, VkCommandBuffer *command_buffers) {
@@ -690,6 +713,7 @@ void create_descriptor_set_layout(VkContext *context) {
         {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // picking storage buffer
         {2, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // acceleration structure
         {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // directional light
+        {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // path tracing output image
     };
 
     VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info = {};
@@ -713,6 +737,22 @@ void create_pipeline_layout(VkContext *context, size_t push_constant_size) {
     pipeline_layout_create_info.pushConstantRangeCount = 1;
     pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
     VkResult result = vkCreatePipelineLayout(context->device, &pipeline_layout_create_info, nullptr, &context->pipeline_layout);
+    assert(result == VK_SUCCESS);
+}
+
+void create_compute_pipeline_layout(VkContext *context, size_t push_constant_size) {
+    VkPushConstantRange push_constant_range = {};
+    push_constant_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    push_constant_range.offset = 0;
+    push_constant_range.size = push_constant_size;
+
+    VkPipelineLayoutCreateInfo pipeline_layout_create_info = {};
+    pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipeline_layout_create_info.setLayoutCount = 1;
+    pipeline_layout_create_info.pSetLayouts = &context->descriptor_set_layout;
+    pipeline_layout_create_info.pushConstantRangeCount = 1;
+    pipeline_layout_create_info.pPushConstantRanges = &push_constant_range;
+    VkResult result = vkCreatePipelineLayout(context->device, &pipeline_layout_create_info, nullptr, &context->compute_pipeline_layout);
     assert(result == VK_SUCCESS);
 }
 
@@ -1076,10 +1116,12 @@ VkDeviceAddress get_acceleration_structure_device_address(VkContext *context, Vk
 }
 
 void cleanup_vulkan(VkContext *context) {
+    vkDestroyPipeline(context->device, context->compute_pipeline, nullptr);
     for (const auto &[pipeline_key, pipeline]: context->pipelines) {
         vkDestroyPipeline(context->device, pipeline, nullptr);
     }
     context->pipelines.clear();
+    vkDestroyPipelineLayout(context->device, context->compute_pipeline_layout, nullptr);
     vkDestroyPipelineLayout(context->device, context->pipeline_layout, nullptr);
     vkDestroyDescriptorSetLayout(context->device, context->descriptor_set_layout, nullptr);
     vkDestroyCommandPool(context->device, context->transfer_command_pool, nullptr);

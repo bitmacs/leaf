@@ -29,6 +29,9 @@ struct PushConstants {
     uint32_t entity_id;
 };
 
+struct PathTracingPushConstants {
+};
+
 struct PipelineKey {
     union {
         struct {
@@ -72,7 +75,9 @@ struct VkContext {
     VkCommandPool transfer_command_pool;
     VkDescriptorSetLayout descriptor_set_layout;
     VkPipelineLayout pipeline_layout;
+    VkPipelineLayout compute_pipeline_layout;
     std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelines;
+    VkPipeline compute_pipeline;
 
     // 动态加载的函数指针
     PFN_vkCmdSetCullMode vkCmdSetCullMode;
@@ -127,12 +132,15 @@ void set_debug_object_name(VkContext *context, VkObjectType object_type, uint64_
 void create_descriptor_set_layout(VkContext *context);
 
 void create_pipeline_layout(VkContext *context, size_t push_constant_size);
+void create_compute_pipeline_layout(VkContext *context, size_t push_constant_size);
 
 void create_shader_module(VkContext *context, const char *filepath, VkShaderModule *shader_module);
 
 void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology, VkPolygonMode polygon_mode, bool depth_test_enabled, bool depth_write_enabled, VkFormat color_image_format, VkFormat depth_image_format, const char *vertex_shader_name, const char *fragment_shader_name);
 
 VkPipeline get_pipeline(VkContext *context, PipelineKey pipeline_key);
+
+void create_compute_pipeline(VkContext *context, const char *shader_name);
 
 void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image, VkImageAspectFlags aspect_mask, VkPipelineStageFlags src_stage_flags, VkPipelineStageFlags dst_stage_flags, VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout src_layout, VkImageLayout dst_layout);
 

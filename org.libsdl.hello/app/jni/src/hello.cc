@@ -461,6 +461,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     create_command_pool(&vk_context);
     create_descriptor_set_layout(&vk_context);
     create_pipeline_layout(&vk_context, sizeof(PushConstants));
+    create_compute_pipeline_layout(&vk_context, sizeof(PathTracingPushConstants));
     create_pipelines(&vk_context);
     create_descriptor_pools(&vk_context);
     descriptor_sets.resize(MAX_FRAMES_IN_FLIGHT);
