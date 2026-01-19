@@ -4,11 +4,18 @@
 // 输入输出
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(set = 0, binding = 4, rgba8ui) uniform restrict writeonly uimage2D output_image;
+layout(set = 0, binding = 4, rgba8) uniform restrict writeonly image2D output_image;
 
 layout(push_constant) uniform PathTracingPushConstants {
     uint camera_index;
 } path_tracing_push_constants;
 
 void main() {
+    uvec2 pixel = gl_GlobalInvocationID.xy;
+    uvec2 image_size = imageSize(output_image);
+    if (pixel.x >= image_size.x || pixel.y >= image_size.y) {
+        return;
+    }
+
+    imageStore(output_image, ivec2(gl_GlobalInvocationID.xy), vec4(1.0, 0.0, 0.0, 1.0));
 }

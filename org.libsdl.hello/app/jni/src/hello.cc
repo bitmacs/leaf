@@ -203,9 +203,9 @@ static void create_path_tracing_images(VkContext *context, AppState *app_state) 
     path_tracing_image_views.resize(MAX_FRAMES_IN_FLIGHT);
     char name[100];
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_image(&vk_context, VK_FORMAT_R8G8B8A8_UINT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &path_tracing_images[i], &path_tracing_image_memories[i]);
+        create_image(&vk_context, VK_FORMAT_R8G8B8A8_UNORM, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &path_tracing_images[i], &path_tracing_image_memories[i]);
         snprintf(name, sizeof(name), "path_tracing_image_%d", i);
-        create_image_view(&vk_context, path_tracing_images[i], VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_ASPECT_COLOR_BIT, &path_tracing_image_views[i], name);
+        create_image_view(&vk_context, path_tracing_images[i], VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, &path_tracing_image_views[i], name);
     }
 }
 
@@ -873,12 +873,28 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     PathTracingPushConstants path_tracing_push_constants = {};
     path_tracing_push_constants.camera_index = 0;
-
     vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
 
     uint32_t group_count_x = (app_state->render_width + 7) / 8;
     uint32_t group_count_y = (app_state->render_height + 7) / 8;
     vkCmdDispatch(command_buffer, group_count_x, group_count_y, 1);
+
+    // 确保 compute shader 完成，path tracing 图像可以用于 transfer
+    record_pipeline_memory_barrier(command_buffer,
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_ACCESS_SHADER_WRITE_BIT,
+                                  VK_ACCESS_TRANSFER_READ_BIT);
+
+    // 转换 path tracing 图像 layout 为 TRANSFER_SRC_OPTIMAL
+    record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
+                                  VK_IMAGE_ASPECT_COLOR_BIT,
+                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_ACCESS_SHADER_WRITE_BIT,
+                                  VK_ACCESS_TRANSFER_READ_BIT,
+                                  VK_IMAGE_LAYOUT_GENERAL,
+                                  VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
     // 转换 color image layout 为 COLOR_ATTACHMENT_OPTIMAL
     // 使用 BOTTOM_OF_PIPE 作为 src stage，表示之前所有操作（包括上一帧的 TRANSFER）都已完成，适合复用的资源（即使当前帧是第一次使用，也表示“之前没有操作”），更符合 in-flight 帧的语义
@@ -1041,7 +1057,12 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
                                       VK_IMAGE_LAYOUT_UNDEFINED, // acquire 后通常是 UNDEFINED
                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-        // Blit 渲染结果到屏幕下半部分（水平居中，底部对齐，保持原始尺寸）
+        // Blit path tracing 结果到屏幕上方（水平居中，顶部对齐，保持原始尺寸）
+        blit_image(command_buffer, path_tracing_images[frame_index], vk_context.swap_chain_images[image_index],
+                   0, 0, app_state->render_width, app_state->render_height, // 源区域：整个 path tracing 图像
+                   (app_state->width - app_state->render_width) / 2, 0, app_state->render_width, app_state->render_height); // 目标区域：屏幕上方
+
+        // Blit 光栅化渲染结果到屏幕下半部分（水平居中，底部对齐，保持原始尺寸）
         blit_image(command_buffer, color_images[frame_index], vk_context.swap_chain_images[image_index],
                    0, 0, app_state->render_width, app_state->render_height, // 源区域：整个渲染图像
                    (app_state->width - app_state->render_width) / 2, app_state->height - app_state->render_height, app_state->render_width, app_state->render_height); // 目标区域：屏幕下半部分
