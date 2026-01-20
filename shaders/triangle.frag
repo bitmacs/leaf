@@ -1,7 +1,7 @@
 #version 460 core
 #extension GL_EXT_ray_query : require
 
-#define EPSILON 0.001
+#include "types.glsl"
 
 layout (location = 0) out vec4 fragColor;
 
