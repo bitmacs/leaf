@@ -1,5 +1,6 @@
 #version 460 core
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_ray_tracing_position_fetch : require
 
 #include "types.glsl"
 
@@ -89,9 +90,27 @@ RayHit traceRay(vec3 origin, vec3 direction, float t_min, float t_max) {
         hit.t = rayQueryGetIntersectionTEXT(ray_query, true);
         hit.position = origin + direction * hit.t;
 
-        // 获取法线（从对象到世界的变换矩阵）
-        mat4x3 object_to_world = rayQueryGetIntersectionObjectToWorldEXT(ray_query, true);
-        hit.normal = normalize(vec3(object_to_world[2])); // 假设对象空间法线是 (0,0,1)
+        // 获取法线：使用 position fetch 扩展获取顶点位置并计算几何法线
+        vec3 triangle_vertices[3];
+        rayQueryGetIntersectionTriangleVertexPositionsEXT(ray_query, true, triangle_vertices);
+
+        // 计算几何法线（对象空间）
+        vec3 edge1 = triangle_vertices[1] - triangle_vertices[0];
+        vec3 edge2 = triangle_vertices[2] - triangle_vertices[0];
+        vec3 object_normal = normalize(cross(edge1, edge2));
+
+        // 法线变换到世界空间：使用逆转置矩阵
+        mat4x3 world_to_object = rayQueryGetIntersectionWorldToObjectEXT(ray_query, true);
+        hit.normal = normalize(transpose(mat3(
+            world_to_object[0].xyz,
+            world_to_object[1].xyz,
+            world_to_object[2].xyz
+        )) * object_normal);
+
+        // 确保法线指向表面外部（与光线方向相反）
+        if (dot(hit.normal, normalize(direction)) > 0.0) {
+            hit.normal = -hit.normal;
+        }
 
         // 根据 entity_id 获取材质颜色
         uint entity_id = rayQueryGetIntersectionInstanceCustomIndexEXT(ray_query, true);

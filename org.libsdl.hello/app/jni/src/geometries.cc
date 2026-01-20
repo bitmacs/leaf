@@ -289,12 +289,12 @@ uint32_t request_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_
                     as_geometry.geometry.triangles = as_geometry_triangles_data;
 
                     // 配置构建信息
-                    VkAccelerationStructureBuildGeometryInfoKHR as_build_geometry_info = {};
-                    as_build_geometry_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
-                    as_build_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-                    as_build_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
-                    as_build_geometry_info.geometryCount = 1;
-                    as_build_geometry_info.pGeometries = &as_geometry;
+                    VkAccelerationStructureBuildGeometryInfoKHR build_geometry_info = {};
+                    build_geometry_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+                    build_geometry_info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+                    build_geometry_info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_DATA_ACCESS_KHR;
+                    build_geometry_info.geometryCount = 1;
+                    build_geometry_info.pGeometries = &as_geometry;
 
                     // 计算图元（三角形）数量：如果有索引则使用索引数，否则使用顶点数
                     uint32_t primitive_count = geometry.index_count > 0 ? geometry.index_count / 3 : geometry.vertex_count / 3;
@@ -302,7 +302,7 @@ uint32_t request_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_
                     // 查询内存需求，返回三个大小：AS 本身大小、构建临时内存、更新临时内存
                     VkAccelerationStructureBuildSizesInfoKHR as_build_sizes_info = {};
                     as_build_sizes_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
-                    context->vkGetAccelerationStructureBuildSizesKHR(context->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &as_build_geometry_info, &primitive_count, &as_build_sizes_info);
+                    context->vkGetAccelerationStructureBuildSizesKHR(context->device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build_geometry_info, &primitive_count, &as_build_sizes_info);
 
                     // 分配 BLAS 存储缓冲区
                     VkMemoryPropertyFlags blas_memory_properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -325,8 +325,8 @@ uint32_t request_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_
                     create_buffer(context, as_build_sizes_info.buildScratchSize, scratch_buffer_usage, blas_memory_properties, &scratch_buffer, &scratch_buffer_memory);
 
                     // 更新构建信息，告诉构建命令将结果写入哪里，使用哪个 scratch buffer
-                    as_build_geometry_info.dstAccelerationStructure = geometry.blas;
-                    as_build_geometry_info.scratchData.deviceAddress = get_buffer_device_address(context, scratch_buffer);
+                    build_geometry_info.dstAccelerationStructure = geometry.blas;
+                    build_geometry_info.scratchData.deviceAddress = get_buffer_device_address(context, scratch_buffer);
 
                     // 准备构建范围，指定构建哪些图元（支持部分构建和多几何体）
                     VkAccelerationStructureBuildRangeInfoKHR build_range_info = {};
@@ -338,7 +338,7 @@ uint32_t request_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_
                     const VkAccelerationStructureBuildRangeInfoKHR *p_build_range_infos = &build_range_info;
 
                     execute_one_time_submit(context, context->transfer_command_pool, context->transfer_queue, [&](VkCommandBuffer command_buffer) {
-                        context->vkCmdBuildAccelerationStructuresKHR(command_buffer, 1, &as_build_geometry_info, &p_build_range_infos);
+                        context->vkCmdBuildAccelerationStructuresKHR(command_buffer, 1, &build_geometry_info, &p_build_range_infos);
                     });
 
                     destroy_buffer(context, scratch_buffer, scratch_buffer_memory);

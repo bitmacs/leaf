@@ -235,6 +235,7 @@ void create_device(VkContext *context) {
     // 4. 加速结构（依赖 buffer_device_address 和 deferred_host_operations）
     required_device_extensions.push_back("VK_KHR_acceleration_structure");
     required_device_extensions.push_back("VK_KHR_ray_query");
+    required_device_extensions.push_back("VK_KHR_ray_tracing_position_fetch"); // 用于在 ray query 中获取顶点位置
     // required_device_extensions.push_back("VK_KHR_pipeline_library");
     // required_device_extensions.push_back("VK_KHR_ray_tracing_pipeline"); // use vkCmdTraceRaysKHR
 
@@ -316,11 +317,17 @@ void create_device(VkContext *context) {
 
     // 启用特性（pNext 链顺序：基础特性在前，依赖特性在后）
 
-    // 4. Ray Query 特性（依赖 acceleration_structure，放在链的末尾）
+    // 5. Ray Tracing Position Fetch 特性（依赖 ray_query，放在链的末尾）
+    VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR ray_tracing_position_fetch_features = {};
+    ray_tracing_position_fetch_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR;
+    ray_tracing_position_fetch_features.rayTracingPositionFetch = VK_TRUE;
+    ray_tracing_position_fetch_features.pNext = nullptr; // 链的末尾
+
+    // 4. Ray Query 特性（依赖 acceleration_structure，放在 acceleration_structure 之后）
     VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
     ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
     ray_query_features.rayQuery = VK_TRUE;
-    ray_query_features.pNext = nullptr; // 链的末尾
+    ray_query_features.pNext = &ray_tracing_position_fetch_features;  // 链接到 position fetch
 
     // 3. Acceleration Structure 特性（依赖 buffer_device_address，放在 buffer_device_address 之后）
     VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure_features = {};
