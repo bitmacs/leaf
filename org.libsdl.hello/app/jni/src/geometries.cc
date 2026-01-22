@@ -26,18 +26,21 @@ GeometryData generate_triangle_geometry_data() {
     return geometry_data;
 }
 
-GeometryData generate_plane_geometry_data(float size, uint32_t segments) {
+GeometryData generate_plane_geometry_data(float width, float height, uint32_t segments) {
     GeometryData geometry_data;
 
-    float step = size / (float) segments;
-    float half_size = size * 0.5f;
+    float step_x = width / (float) segments;
+    float step_z = height / (float) segments;
+    float half_width = width * 0.5f;
+    float half_height = height * 0.5f;
 
     // 生成顶点（平面在 XZ 平面，法线指向 +Y 方向）
+    // X方向对应width，Z方向对应height
     const float normal[3] = {0.0f, 1.0f, 0.0f};
     for (uint32_t z = 0; z <= segments; ++z) {
         for (uint32_t x = 0; x <= segments; ++x) {
-            float x_pos = -half_size + x * step;
-            float z_pos = -half_size + z * step;
+            float x_pos = -half_width + x * step_x;
+            float z_pos = -half_height + z * step_z;
 
             geometry_data.vertices.push_back({
                 {x_pos, 0.0f, z_pos},

@@ -107,7 +107,7 @@ static std::vector<PickingState> picking_states = {}; // each in-flight frame ha
 
 static Camera camera = {};
 static glm::vec3 camera_orbit_target = glm::vec3(0.0f, 0.0f, 0.0f);
-static float camera_orbit_radius = 6.0f;
+static float camera_orbit_radius = 6.5f;
 static bool is_dragging = false;
 static glm::vec2 prev_mouse_pos = glm::vec2(0.0f);
 static glm::vec2 mouse_pos = glm::vec2(0.0f);
@@ -518,7 +518,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         entities.push_back({1, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});
     }
     {
-        GeometryData geometry_data = generate_plane_geometry_data(4.0f, 2);
+        GeometryData geometry_data = generate_plane_geometry_data(4.0f, 4.0f, 2);
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
         Transform transform = {glm::vec3(0.0f, 0.0f, 0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
         entities.push_back({2, geometry_handle, transform, glm::vec3(0.0f, 1.0f, 0.0f)});
@@ -536,6 +536,15 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         // 位置在三角形前方、立方体的对面：三角形在 (0, 0.5, 0)，立方体在 (-1.0, 0.5, 1.0)，球体在 (1.0, 0.5, 1.0)
         Transform transform = {glm::vec3(1.0f, 0.5f, 1.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
         entities.push_back({4, geometry_handle, transform, glm::vec3(1.0f, 1.0f, 0.0f)});  // 黄色球体
+    }
+    {
+        // 左侧墙（Cornell box风格）- 竖着的，面向+x
+        GeometryData geometry_data = generate_plane_geometry_data(2.0f, 3.0f, 2);
+        uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
+        // 绕Z轴旋转-90度，使平面变成YZ平面（垂直），法线指向+X方向
+        glm::quat rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        Transform transform = {glm::vec3(-2.0f, 1.0f, 0.0f), rotation, glm::vec3(1.0f, 1.0f, 1.0f)};
+        entities.push_back({5, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});  // 红色左侧墙
     }
 
     last_frame_time = SDL_GetTicksNS(); // 初始化第一帧的时间

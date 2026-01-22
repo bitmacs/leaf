@@ -149,9 +149,10 @@ RayHit traceRay(vec3 origin, vec3 direction, float t_min, float t_max) {
 
         uint entity_id = rayQueryGetIntersectionInstanceCustomIndexEXT(ray_query, true);
         if (entity_id == 1) hit.albedo = vec3(1.0, 0.0, 0.0);
-        else if (entity_id == 2) hit.albedo = vec3(0.0, 1.0, 0.0);
+        else if (entity_id == 2) hit.albedo = vec3(0.5);
         else if (entity_id == 3) hit.albedo = vec3(0.0, 0.0, 1.0);
         else if (entity_id == 4) hit.albedo = vec3(1.0, 1.0, 0.0);
+        else if (entity_id == 5) hit.albedo = vec3(1.0, 0.0, 0.0);  // 红色左侧墙（Cornell box风格）
         else hit.albedo = vec3(0.5);
     }
 
