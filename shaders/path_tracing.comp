@@ -17,7 +17,7 @@ layout(set = 0, binding = 0, std140) uniform CameraBuffer {
 layout(set = 0, binding = 2) uniform accelerationStructureEXT top_level_as;
 
 layout(set = 0, binding = 3, std140) uniform DirectionalLight {
-    vec3 direction;
+    vec3 direction; // 太阳光方向（从太阳指向场景，归一化）
 } light;
 
 layout(set = 0, binding = 4, rgba8) uniform restrict writeonly image2D output_image;
@@ -26,6 +26,20 @@ layout(push_constant) uniform PathTracingPushConstants {
     uint camera_index;
     uint iteration;  // 渐进式渲染的全局迭代次数（用于生成不同的随机种子）
 } pc;
+
+// ========== 太阳光（面积光）参数 ==========
+// 太阳作为虚拟球体光源的物理参数
+#define SUN_DISTANCE 10000.0           // 太阳虚拟距离（足够远可视为无限）
+// 太阳角半径：真实值约 0.00465 弧度 (0.267°)
+// 增大此值可获得更柔和的阴影（艺术化调整）
+const float SUN_ANGULAR_RADIUS = 0.02; // 艺术化增强，约 1.15°
+
+const float SOLID_ANGLE_SUN = 2.0 * PI * (1.0 - cos(SUN_ANGULAR_RADIUS));
+
+// 太阳光照强度（W/m²/sr）
+// 真实太阳辐亮度约 20,000,000 W/(m²·sr) ≈ 20 MW/(m²·sr)
+// 考虑到相机曝光和动态范围，使用缩放值便于 Tone Mapping
+const vec3 SUN_INTENSITY = vec3(50.0, 49.0, 47.5); // 物理合理的太阳强度
 
 // 光线命中信息
 struct RayHit {
@@ -44,25 +58,52 @@ vec2 random2(uint seed) {
     );
 }
 
-// 在单位圆盘上均匀采样（用于余弦加权采样）
+// 在单位圆盘上均匀采样
 vec2 sampleDisk(vec2 u) {
-    float r = sqrt(u.x);              // 均匀分布半径
-    float theta = TWO_PI * u.y;       // 均匀分布角度
+    float r = sqrt(u.x);
+    float theta = TWO_PI * u.y;
     return vec2(r * cos(theta), r * sin(theta));
 }
 
-// 在单位半球上余弦加权采样（重要性采样，匹配 Lambert BRDF）
-// 这是 Monte Carlo 重要性采样的核心：根据 BRDF 的分布采样，减少方差
+// 在单位半球上余弦加权采样
 vec3 sampleCosineHemisphere(vec2 u, vec3 normal) {
     vec2 disk = sampleDisk(u);
     float z = sqrt(max(0.0, 1.0 - disk.x * disk.x - disk.y * disk.y));
 
-    // 构建切空间基向量
     vec3 tangent = normalize(cross(normal, abs(normal.x) > 0.9 ? vec3(0, 1, 0) : vec3(1, 0, 0)));
     vec3 bitangent = cross(normal, tangent);
 
-    // 转换到世界空间
     return normalize(tangent * disk.x + bitangent * disk.y + normal * z);
+}
+
+// ========== MIS 辅助函数 ==========
+
+// 余弦加权半球采样的 PDF
+float cosineHemispherePDF(vec3 normal, vec3 direction) {
+    float cos_theta = max(dot(normal, direction), 0.0);
+    return cos_theta * ONE_OVER_PI;
+}
+
+// 太阳圆盘采样的 PDF（均匀分布在圆盘上）
+// p(ω) = 1 / Ω，其中 Ω 是太阳的立体角
+float sunDiskPDF() {
+    return 1.0 / SOLID_ANGLE_SUN;
+}
+
+// 检查方向是否在太阳圆盘内
+bool isDirectionInSunDisk(vec3 direction, vec3 sun_dir) {
+    float cos_angle = max(dot(normalize(direction), normalize(sun_dir)), 0.0);
+    float angle = acos(clamp(cos_angle, 0.0, 1.0));
+    return angle < SUN_ANGULAR_RADIUS;
+}
+
+// Power Heuristic：MIS 的核心
+float powerHeuristic(float p_f, float p_g) {
+    p_f = max(p_f, 1e-8);
+    p_g = max(p_g, 1e-8);
+    float pow_p_f = pow(p_f, 2.0);
+    float pow_p_g = pow(p_g, 2.0);
+    return pow_p_f / (pow_p_f + pow_p_g);
 }
 
 RayHit traceRay(vec3 origin, vec3 direction, float t_min, float t_max) {
@@ -80,26 +121,21 @@ RayHit traceRay(vec3 origin, vec3 direction, float t_min, float t_max) {
                           direction,
                           t_max);
 
-    // 执行光线查询
     while(rayQueryProceedEXT(ray_query)) {
     }
 
-    // 检查是否有命中
     if (rayQueryGetIntersectionTypeEXT(ray_query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
         hit.hit = true;
         hit.t = rayQueryGetIntersectionTEXT(ray_query, true);
         hit.position = origin + direction * hit.t;
 
-        // 获取法线：使用 position fetch 扩展获取顶点位置并计算几何法线
         vec3 triangle_vertices[3];
         rayQueryGetIntersectionTriangleVertexPositionsEXT(ray_query, true, triangle_vertices);
 
-        // 计算几何法线（对象空间）
         vec3 edge1 = triangle_vertices[1] - triangle_vertices[0];
         vec3 edge2 = triangle_vertices[2] - triangle_vertices[0];
         vec3 object_normal = normalize(cross(edge1, edge2));
 
-        // 法线变换到世界空间：使用逆转置矩阵
         mat4x3 world_to_object = rayQueryGetIntersectionWorldToObjectEXT(ray_query, true);
         hit.normal = normalize(transpose(mat3(
             world_to_object[0].xyz,
@@ -107,78 +143,183 @@ RayHit traceRay(vec3 origin, vec3 direction, float t_min, float t_max) {
             world_to_object[2].xyz
         )) * object_normal);
 
-        // 确保法线指向表面外部（与光线方向相反）
         if (dot(hit.normal, normalize(direction)) > 0.0) {
             hit.normal = -hit.normal;
         }
 
-        // 根据 entity_id 获取材质颜色
         uint entity_id = rayQueryGetIntersectionInstanceCustomIndexEXT(ray_query, true);
-        if (entity_id == 1) {
-            hit.albedo = vec3(1.0, 0.0, 0.0); // Red
-        } else if (entity_id == 2) {
-            hit.albedo = vec3(0.0, 1.0, 0.0); // Green
-        } else if (entity_id == 3) {
-            hit.albedo = vec3(0.0, 0.0, 1.0); // Blue
-        } else if (entity_id == 4) {
-            hit.albedo = vec3(1.0, 1.0, 0.0); // Yellow
-        } else {
-            hit.albedo = vec3(0.5); // Default gray
-        }
+        if (entity_id == 1) hit.albedo = vec3(1.0, 0.0, 0.0);
+        else if (entity_id == 2) hit.albedo = vec3(0.0, 1.0, 0.0);
+        else if (entity_id == 3) hit.albedo = vec3(0.0, 0.0, 1.0);
+        else if (entity_id == 4) hit.albedo = vec3(1.0, 1.0, 0.0);
+        else hit.albedo = vec3(0.5);
     }
 
     return hit;
 }
 
-// Monte Carlo 路径追踪核心函数
-// 实现渲染方程：L_o(x,ω_o) = ∫_Ω f_r(x,ω_i,ω_o) * L_i(x,ω_i) * cos(θ_i) dω_i
-// 通过随机采样估计积分值
-vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
-    vec3 throughput = vec3(1.0);  // 路径的累积权重（Monte Carlo 重要性采样权重）
-    vec3 radiance = vec3(0.0);     // 累积的辐射度（积分估计值）
+// ========== 太阳圆盘（面积光）实现 ==========
 
-    // 路径追踪循环：模拟光线的多次反弹
+// 构建太阳圆盘的局部坐标系
+void buildSunCoordinateSystem(vec3 sun_dir, out vec3 sun_x, out vec3 sun_y) {
+    sun_x = normalize(cross(sun_dir, abs(sun_dir.x) < 0.9 ? vec3(1,0,0) : vec3(0,1,0)));
+    sun_y = cross(sun_x, sun_dir);
+}
+
+// 从太阳立体角内均匀采样一个方向（NEE - Light Sampling）
+// 这是 MIS 的光源采样分支：直接在方向域采样太阳的立体角
+// 使用圆锥内均匀采样（uniform conical sampling in solid angle）
+vec3 sampleSunDiskDirection(vec2 u, out float pdf_sun) {
+    vec3 sun_dir = normalize(-light.direction);
+
+    // 在圆锥内均匀采样（solid angle 域均匀采样）
+    // PDF = 1 / Ω_sun = 1 / [2π(1 - cos(θ_max))]
+    // 采样方法：cos_theta 从 [cos(θ_max), 1] 线性采样
+    float cos_max = cos(SUN_ANGULAR_RADIUS);
+    float cos_theta_sun = mix(cos_max, 1.0, u.x);
+
+    float sin_theta = sqrt(1.0 - cos_theta_sun * cos_theta_sun);
+    float phi = TWO_PI * u.y;
+
+    // 构建太阳局部坐标系
+    vec3 sun_x, sun_y;
+    buildSunCoordinateSystem(sun_dir, sun_x, sun_y);
+
+    // 转换到世界空间
+    vec3 sampled_dir = normalize(
+        sin_theta * cos(phi) * sun_x +
+        sin_theta * sin(phi) * sun_y +
+        cos_theta_sun * sun_dir
+    );
+
+    // PDF 正确公式：立体角均匀采样
+    // p(ω) = 1 / Ω_sun = 1 / [2π(1 - cos(θ_max))]
+    pdf_sun = 1.0 / SOLID_ANGLE_SUN;
+
+    return sampled_dir;
+}
+
+// 评估太阳光的辐射度（太阳不是点光源，而是一个有面积的发光圆盘）
+// Le(ω) = L_sun * V(x, ω)，其中 V 是可见性函数
+vec3 evaluateSunRadiance(vec3 direction) {
+    vec3 sun_dir = normalize(-light.direction);
+
+    if (isDirectionInSunDisk(direction, sun_dir)) {
+        // 太阳光的辐射度 L = E / π (朗伯特发射体近似)
+        // 实际太阳更接近黑体辐射，但这里简化处理
+        return SUN_INTENSITY;
+    }
+    return vec3(0.0);
+}
+
+// ========== 带太阳面积光的 MIS 路径追踪 ==========
+
+vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
+    vec3 throughput = vec3(1.0);
+    vec3 radiance = vec3(0.0);
+
     for (int depth = 0; depth < MAX_DEPTH; ++depth) {
         uint seed = pixel_seed + uint(depth) * 1000u;
 
-        // 追踪光线
-        RayHit hit = traceRay(origin, direction, EPSILON, 1000.0);
+        RayHit hit = traceRay(origin, direction, EPSILON, 10000.0);
 
         if (!hit.hit) {
-            // 击中天空：添加环境光（简化处理）
-            radiance += throughput * vec3(0.5, 0.7, 1.0) * 0.3;
+            // 击中天空：检查是否击中太阳
+            // 当光线从相机直接击中太阳时，这是路径的终结点
+            // 不需要 MIS，因为只有一个采样策略（BSDF采样）
+            vec3 L_sun = evaluateSunRadiance(direction);
+            radiance += throughput * L_sun;
+
+            // 天空环境光（非太阳区域）
+            radiance += throughput * vec3(0.5, 0.7, 1.0) * 0.15;
             break;
         }
 
-        // 直接光照（简化：平行光，无阴影）
-        vec3 light_dir = normalize(-light.direction);
-        float NdotL = max(dot(hit.normal, light_dir), 0.0);
+        // ========== MIS 计算：NEE + BSDF ==========
 
-        // Lambert BRDF：f_r = albedo / π
-        // 这是最简单的漫反射 BRDF，满足能量守恒
-        vec3 brdf = hit.albedo * ONE_OVER_PI;
+        // ========== 分支 1：NEE（Next Event Estimation）- 光源采样 ==========
+        // 直接从太阳圆盘采样，寻找直接光照
+        vec2 u_sun = random2(seed + 100u);
+        float pdf_sun;
+        vec3 sampled_sun_dir = sampleSunDiskDirection(u_sun, pdf_sun);
 
-        // 渲染方程的直接光照项：f_r * L_i * cos(θ)
-        vec3 direct_light = brdf * NdotL * vec3(1.0); // 光源强度为 1.0
-        radiance += throughput * direct_light;
+        float NdotL_sun = max(dot(hit.normal, sampled_sun_dir), 0.0);
+        if (NdotL_sun > 0.0 && pdf_sun > 0.0) {
+            // 投射阴影光线
+            vec3 shadow_origin = hit.position + hit.normal * EPSILON;
+            RayHit shadow_hit = traceRay(shadow_origin, sampled_sun_dir, EPSILON, 100000.0);
 
-        // Russian Roulette：Monte Carlo 路径终止技术
-        // 根据路径权重概率性终止，减少计算量同时保持无偏估计
-        float p_terminate = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.1, 0.95);
-        if (random(seed) > p_terminate) {
-            break; // 终止路径
+            // 太阳在无限远处，如果光线没有被近距离遮挡则可见
+            bool sun_visible = (!shadow_hit.hit) || (shadow_hit.t > 1000.0);
+
+            if (sun_visible) {
+                // 评估太阳辐射度
+                vec3 L_sun = SUN_INTENSITY;
+
+                // 计算 BSDF 在该太阳方向的 PDF
+                float pdf_bsdf_at_sun = cosineHemispherePDF(hit.normal, sampled_sun_dir);
+
+                // MIS 权重：光源采样分支
+                float mis_weight_sun = powerHeuristic(pdf_sun, pdf_bsdf_at_sun);
+
+                // Lambert BRDF
+                vec3 brdf = hit.albedo * ONE_OVER_PI;
+
+                // NEE 贡献：f * L * cos / pdf * mis_weight
+                vec3 nee_contribution = brdf * L_sun * NdotL_sun * mis_weight_sun / pdf_sun;
+                radiance += throughput * nee_contribution;
+            }
         }
-        throughput /= p_terminate;  // 补偿终止概率，保持无偏：E[estimate] = E[true_value]
 
-        // Monte Carlo 重要性采样：根据 BRDF 分布采样新方向
-        // 使用余弦加权采样（匹配 Lambert BRDF 的分布），减少方差
-        vec2 u = random2(seed + 100u);
-        vec3 new_direction = sampleCosineHemisphere(u, hit.normal);
+        // ========== 分支 2：BSDF 采样 ==========
+        // 从 BRDF 分布采样方向，如果击中太阳则计入贡献
+        vec2 u_bsdf = random2(seed + 200u);
+        vec3 bsdf_dir = sampleCosineHemisphere(u_bsdf, hit.normal);
+        float pdf_bsdf = cosineHemispherePDF(hit.normal, bsdf_dir);
+        float Ndot_bsdf = max(dot(hit.normal, bsdf_dir), 0.0);
 
-        // 更新路径：继续追踪
-        origin = hit.position + hit.normal * EPSILON; // 避免自相交
-        direction = new_direction;
-        throughput *= hit.albedo; // 累积材质颜色（简化：假设纯漫反射）
+        if (Ndot_bsdf > 0.0 && pdf_bsdf > 0.0) {
+            // 追踪 BSDF 采样的光线
+            vec3 bsdf_origin = hit.position + hit.normal * EPSILON;
+            RayHit bsdf_hit = traceRay(bsdf_origin, bsdf_dir, EPSILON, 100000.0);
+
+            if (!bsdf_hit.hit) {
+                // 检查是否击中太阳
+                vec3 L_sun_to_bsdf = evaluateSunRadiance(bsdf_dir);
+                if (length(L_sun_to_bsdf) > 0.0) {
+                    // 计算 BSDF 太阳方向的 PDF
+                    // 对于太阳圆盘采样，PDF 是 1/Ω_sun
+                    float pdf_sun_at_bsdf = sunDiskPDF();
+
+                    // MIS 权重：BSDF 采样分支
+                    float mis_weight_bsdf = powerHeuristic(pdf_bsdf, pdf_sun_at_bsdf);
+
+                    // Lambert BRDF
+                    vec3 brdf = hit.albedo * ONE_OVER_PI;
+
+                    // BSDF 贡献：f * L * cos * mis_weight / pdf
+                    vec3 bsdf_contribution = brdf * L_sun_to_bsdf * Ndot_bsdf * mis_weight_bsdf / pdf_bsdf;
+                    radiance += throughput * bsdf_contribution;
+                }
+            }
+        }
+
+        // ========== 间接光照 - 路径继续 ==========
+
+        // Russian Roulette: 从第2跳开始，避免过早终止直接光
+        float p_terminate = depth >= 2 ? clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.1, 0.95) : 1.0;
+        if (random(seed + 300u) > p_terminate) {
+            break;
+        }
+        throughput /= p_terminate;
+
+        // 为下一跳采样新的方向
+        vec2 u_next = random2(seed + 400u);
+        direction = sampleCosineHemisphere(u_next, hit.normal);
+
+        // 更新路径状态
+        origin = hit.position + hit.normal * EPSILON;
+        throughput *= hit.albedo;
     }
 
     return radiance;
@@ -191,31 +332,23 @@ void main() {
         return;
     }
 
-    // 生成像素的基础随机种子
-    // 使用哈希函数组合 iteration 和像素坐标，确保每帧使用不同的随机数
     uint iteration_hash = pcg_hash(pc.iteration);
     uint pixel_hash = pixel.y * image_size.x + pixel.x;
     uint base_pixel_seed = iteration_hash ^ (pixel_hash << 10u) ^ (pixel_hash >> 10u);
 
-    // 相机参数
     Camera cam = cameras[pc.camera_index];
     mat4 inv_view = inverse(cam.view);
     mat4 inv_proj = inverse(cam.projection);
 
-    // Monte Carlo 采样：当前迭代的采样
     vec3 current_radiance = vec3(0.0);
 
     for (int s = 0; s < SAMPLES_PER_ITERATION; ++s) {
         uint sample_seed = base_pixel_seed + uint(s) * 10000u;
 
-        // 像素抖动（抗锯齿）
-        vec2 jitter = random2(sample_seed) - 0.5; // [-0.5, 0.5]
-
-        // 计算像素在 NDC 空间的位置
+        vec2 jitter = random2(sample_seed) - 0.5;
         vec2 uv = (vec2(pixel) + vec2(0.5) + jitter) / vec2(image_size);
         vec2 ndc = uv * 2.0 - 1.0;
 
-        // 生成相机光线（逆投影变换）
         vec4 near_point = inv_proj * vec4(ndc, 0.0, 1.0);
         near_point /= near_point.w;
         vec4 far_point = inv_proj * vec4(ndc, 1.0, 1.0);
@@ -224,17 +357,17 @@ void main() {
         vec3 ray_dir_world = normalize((inv_view * far_point).xyz - (inv_view * near_point).xyz);
         vec3 ray_origin_world = (inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 
-        // 路径追踪
         current_radiance += pathTrace(ray_origin_world, ray_dir_world, sample_seed);
     }
 
-    // Monte Carlo 估计：平均当前迭代的样本
     current_radiance /= float(SAMPLES_PER_ITERATION);
 
-    // 转换为 LDR（clamp + gamma 校正）
-    vec3 ldr_color = clamp(current_radiance, 0.0, 1.0);
-    ldr_color = pow(ldr_color, vec3(1.0 / 2.2)); // gamma 校正
+    // 转换为 LDR（带曝光的 tone mapping）
+    // 曝光值：1.0 = 正常，0.5 = 一档暗，2.0 = 一档亮
+    const float exposure = 4.0;
+    vec3 ldr_color = vec3(1.0) - exp(-current_radiance * exposure);
+    ldr_color = clamp(ldr_color, 0.0, 1.0);
+    ldr_color = pow(ldr_color, vec3(1.0 / 2.2));
 
-    // 直接写入输出图像
     imageStore(output_image, ivec2(pixel), vec4(ldr_color, 1.0));
 }
