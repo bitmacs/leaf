@@ -5,7 +5,7 @@
 #include "types.glsl"
 
 // Monte Carlo 路径追踪参数
-#define MAX_DEPTH 5                    // 最大路径深度（bounce次数）
+#define MAX_DEPTH 3                    // 最大路径深度（bounce次数）
 #define SAMPLES_PER_ITERATION 1        // 每帧每像素采样次数（渐进式渲染：每帧累积少量样本）
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -97,14 +97,7 @@ bool isDirectionInSunDisk(vec3 direction, vec3 sun_dir) {
     return angle < SUN_ANGULAR_RADIUS;
 }
 
-// Power Heuristic：MIS 的核心
-float powerHeuristic(float p_f, float p_g) {
-    p_f = max(p_f, 1e-8);
-    p_g = max(p_g, 1e-8);
-    float pow_p_f = pow(p_f, 2.0);
-    float pow_p_g = pow(p_g, 2.0);
-    return pow_p_f / (pow_p_f + pow_p_g);
-}
+float balanceHeuristic(float p_f, float p_g) { return p_f / (p_f + p_g); }
 
 RayHit traceRay(vec3 origin, vec3 direction, float t_min, float t_max) {
     RayHit hit;
@@ -170,7 +163,7 @@ void buildSunCoordinateSystem(vec3 sun_dir, out vec3 sun_x, out vec3 sun_y) {
 // 从太阳立体角内均匀采样一个方向（NEE - Light Sampling）
 // 这是 MIS 的光源采样分支：直接在方向域采样太阳的立体角
 // 使用圆锥内均匀采样（uniform conical sampling in solid angle）
-vec3 sampleSunDiskDirection(vec2 u, out float pdf_sun) {
+vec3 sampleSunDiskDirection(vec2 u) {
     vec3 sun_dir = normalize(-light.direction);
 
     // 在圆锥内均匀采样（solid angle 域均匀采样）
@@ -192,10 +185,6 @@ vec3 sampleSunDiskDirection(vec2 u, out float pdf_sun) {
         sin_theta * sin(phi) * sun_y +
         cos_theta_sun * sun_dir
     );
-
-    // PDF 正确公式：立体角均匀采样
-    // p(ω) = 1 / Ω_sun = 1 / [2π(1 - cos(θ_max))]
-    pdf_sun = 1.0 / SOLID_ANGLE_SUN;
 
     return sampled_dir;
 }
@@ -241,8 +230,8 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
         // ========== 分支 1：NEE（Next Event Estimation）- 光源采样 ==========
         // 直接从太阳圆盘采样，寻找直接光照
         vec2 u_sun = random2(seed + 100u);
-        float pdf_sun;
-        vec3 sampled_sun_dir = sampleSunDiskDirection(u_sun, pdf_sun);
+        float pdf_sun = sunDiskPDF();
+        vec3 sampled_sun_dir = sampleSunDiskDirection(u_sun);
 
         float NdotL_sun = max(dot(hit.normal, sampled_sun_dir), 0.0);
         if (NdotL_sun > 0.0 && pdf_sun > 0.0) {
@@ -261,14 +250,14 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
                 float pdf_bsdf_at_sun = cosineHemispherePDF(hit.normal, sampled_sun_dir);
 
                 // MIS 权重：光源采样分支
-                float mis_weight_sun = powerHeuristic(pdf_sun, pdf_bsdf_at_sun);
+                float mis_weight_sun = balanceHeuristic(pdf_sun, pdf_bsdf_at_sun);
 
                 // Lambert BRDF
                 vec3 brdf = hit.albedo * ONE_OVER_PI;
 
                 // NEE 贡献：f * L * cos / pdf * mis_weight
-                vec3 nee_contribution = brdf * L_sun * NdotL_sun * mis_weight_sun / pdf_sun;
-                radiance += throughput * nee_contribution;
+                vec3 nee_contrib = brdf * L_sun * NdotL_sun * mis_weight_sun / pdf_sun;
+                radiance += throughput * nee_contrib;
             }
         }
 
@@ -293,14 +282,14 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
                     float pdf_sun_at_bsdf = sunDiskPDF();
 
                     // MIS 权重：BSDF 采样分支
-                    float mis_weight_bsdf = powerHeuristic(pdf_bsdf, pdf_sun_at_bsdf);
+                    float mis_weight_bsdf = balanceHeuristic(pdf_bsdf, pdf_sun_at_bsdf);
 
                     // Lambert BRDF
                     vec3 brdf = hit.albedo * ONE_OVER_PI;
 
                     // BSDF 贡献：f * L * cos * mis_weight / pdf
-                    vec3 bsdf_contribution = brdf * L_sun_to_bsdf * Ndot_bsdf * mis_weight_bsdf / pdf_bsdf;
-                    radiance += throughput * bsdf_contribution;
+                    vec3 bsdf_contrib = brdf * L_sun_to_bsdf * Ndot_bsdf * mis_weight_bsdf / pdf_bsdf;
+                    radiance += throughput * bsdf_contrib;
                 }
             }
         }
