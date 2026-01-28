@@ -1,7 +1,7 @@
 // Shader 类型定义
 // 所有 shader 都可以通过 #include "types.glsl" 使用这些类型定义
 
-const float EPSILON = 0.001;
+const float EPSILON = 0.0001;
 const float PI = 3.14159265358979323846;
 const float TWO_PI = 6.28318530717958647693;
 const float ONE_OVER_PI = 1.0 / PI;
