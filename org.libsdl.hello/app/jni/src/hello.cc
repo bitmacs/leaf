@@ -539,7 +539,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     }
     {
         // 左侧墙（Cornell box风格）- 竖着的，面向+x
-        GeometryData geometry_data = generate_plane_geometry_data(2.0f, 3.0f, 2);
+        GeometryData geometry_data = generate_plane_geometry_data(2.0f, 4.0f, 2);
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
         // 绕Z轴旋转-90度，使平面变成YZ平面（垂直），法线指向+X方向
         glm::quat rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
