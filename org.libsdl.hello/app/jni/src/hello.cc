@@ -547,6 +547,24 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         entities.push_back({5, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});  // 红色左侧墙
     }
 
+    // 等待所有 mesh 上传完成后再进入首帧，避免“部分 mesh 不显示或很久才出现”
+    {
+        const unsigned timeout_ms = 30000;
+        unsigned waited_ms = 0;
+        while (waited_ms < timeout_ms) {
+            bool all_uploaded = true;
+            for (const Entity &e : entities) {
+                if (!is_geometry_uploaded(&geometry_registry, e.geometry_handle)) {
+                    all_uploaded = false;
+                    break;
+                }
+            }
+            if (all_uploaded) { break; }
+            SDL_Delay(1);
+            waited_ms += 1;
+        }
+    }
+
     last_frame_time = SDL_GetTicksNS(); // 初始化第一帧的时间
     return SDL_APP_CONTINUE;
 }
