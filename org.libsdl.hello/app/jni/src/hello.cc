@@ -102,6 +102,19 @@ static std::vector<VkImage> path_tracing_images = {};
 static std::vector<VkDeviceMemory> path_tracing_image_memories = {};
 static std::vector<VkImageView> path_tracing_image_views = {};
 
+static std::vector<VkImage> gbuffer_position_images = {};
+static std::vector<VkImage> gbuffer_normal_images = {};
+static std::vector<VkImage> gbuffer_albedo_images = {};
+static std::vector<VkImage> gbuffer_depth_images = {};
+static std::vector<VkDeviceMemory> gbuffer_position_memories = {};
+static std::vector<VkDeviceMemory> gbuffer_normal_memories = {};
+static std::vector<VkDeviceMemory> gbuffer_albedo_memories = {};
+static std::vector<VkDeviceMemory> gbuffer_depth_memories = {};
+static std::vector<VkImageView> gbuffer_position_views = {};
+static std::vector<VkImageView> gbuffer_normal_views = {};
+static std::vector<VkImageView> gbuffer_albedo_views = {};
+static std::vector<VkImageView> gbuffer_depth_views = {};
+
 static std::vector<FrameState> frame_states = {}; // each in-flight frame has one frame state
 static std::vector<PickingState> picking_states = {}; // each in-flight frame has one picking state
 
@@ -147,7 +160,7 @@ static void create_descriptor_pools(VkContext *context) {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}, // camera + light (2 uniform buffers)
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, // picking storage buffer
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}, // acceleration structure
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}, // path tracing output image
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5}, // one path tracing output image + four gbuffer images
     };
 
     VkDescriptorPoolCreateInfo descriptor_pool_create_info = {};
@@ -217,6 +230,61 @@ static void destroy_path_tracing_images(VkContext *context) {
     path_tracing_image_views.clear();
     path_tracing_images.clear();
     path_tracing_image_memories.clear();
+}
+
+static void create_gbuffer_images(VkContext *context, AppState *app_state) {
+    gbuffer_position_images.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_normal_images.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_albedo_images.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_depth_images.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_position_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_normal_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_albedo_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_depth_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_position_views.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_normal_views.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_albedo_views.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_depth_views.resize(MAX_FRAMES_IN_FLIGHT);
+    char name[100];
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_position_images[i], &gbuffer_position_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_normal_images[i], &gbuffer_normal_memories[i]);
+        create_image(context, VK_FORMAT_R8G8B8A8_UNORM, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_albedo_images[i], &gbuffer_albedo_memories[i]);
+        create_image(context, VK_FORMAT_R32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_depth_images[i], &gbuffer_depth_memories[i]);
+        snprintf(name, sizeof(name), "gbuffer_position_%u", i);
+        create_image_view(context, gbuffer_position_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &gbuffer_position_views[i], name);
+        snprintf(name, sizeof(name), "gbuffer_normal_%u", i);
+        create_image_view(context, gbuffer_normal_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &gbuffer_normal_views[i], name);
+        snprintf(name, sizeof(name), "gbuffer_albedo_%u", i);
+        create_image_view(context, gbuffer_albedo_images[i], VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, &gbuffer_albedo_views[i], name);
+        snprintf(name, sizeof(name), "gbuffer_depth_%u", i);
+        create_image_view(context, gbuffer_depth_images[i], VK_FORMAT_R32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &gbuffer_depth_views[i], name);
+    }
+}
+
+static void destroy_gbuffer_images(VkContext *context) {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkDestroyImageView(context->device, gbuffer_position_views[i], nullptr);
+        vkDestroyImageView(context->device, gbuffer_normal_views[i], nullptr);
+        vkDestroyImageView(context->device, gbuffer_albedo_views[i], nullptr);
+        vkDestroyImageView(context->device, gbuffer_depth_views[i], nullptr);
+        destroy_image(context, gbuffer_position_images[i], gbuffer_position_memories[i]);
+        destroy_image(context, gbuffer_normal_images[i], gbuffer_normal_memories[i]);
+        destroy_image(context, gbuffer_albedo_images[i], gbuffer_albedo_memories[i]);
+        destroy_image(context, gbuffer_depth_images[i], gbuffer_depth_memories[i]);
+    }
+    gbuffer_position_views.clear();
+    gbuffer_normal_views.clear();
+    gbuffer_albedo_views.clear();
+    gbuffer_depth_views.clear();
+    gbuffer_position_images.clear();
+    gbuffer_normal_images.clear();
+    gbuffer_albedo_images.clear();
+    gbuffer_depth_images.clear();
+    gbuffer_position_memories.clear();
+    gbuffer_normal_memories.clear();
+    gbuffer_albedo_memories.clear();
+    gbuffer_depth_memories.clear();
 }
 
 static void create_top_level_acceleration_structures(VkContext *context, uint32_t max_instance_count) {
@@ -411,6 +479,7 @@ static void app_resize(AppState *app_state) {
         frame_state.geometry_handles.clear();
     }
     frame_states.clear();
+    destroy_gbuffer_images(&vk_context);
     destroy_path_tracing_images(&vk_context);
     destroy_framebuffers();
     destroy_swap_chain(&vk_context);
@@ -419,6 +488,7 @@ static void app_resize(AppState *app_state) {
     create_swap_chain(&vk_context, app_state->width, app_state->height);
     create_framebuffers(app_state);
     create_path_tracing_images(&vk_context, app_state);
+    create_gbuffer_images(&vk_context, app_state);
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
     picking_states.resize(MAX_FRAMES_IN_FLIGHT, PICKING_STATE_NONE);
     frame_index = 0; // reset frame index
@@ -486,6 +556,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
 
     create_framebuffers(app_state);
     create_path_tracing_images(&vk_context, app_state);
+    create_gbuffer_images(&vk_context, app_state);
     picking_storage_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     picking_storage_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -860,6 +931,58 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         write_descriptor_set.pImageInfo = &path_tracing_image_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
+    {
+        VkDescriptorImageInfo gbuffer_position_info = {};
+        gbuffer_position_info.imageView = gbuffer_position_views[frame_index];
+        gbuffer_position_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 5;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &gbuffer_position_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo gbuffer_normal_info = {};
+        gbuffer_normal_info.imageView = gbuffer_normal_views[frame_index];
+        gbuffer_normal_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 6;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &gbuffer_normal_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo gbuffer_albedo_info = {};
+        gbuffer_albedo_info.imageView = gbuffer_albedo_views[frame_index];
+        gbuffer_albedo_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 7;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &gbuffer_albedo_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo gbuffer_depth_info = {};
+        gbuffer_depth_info.imageView = gbuffer_depth_views[frame_index];
+        gbuffer_depth_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set  = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 8;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &gbuffer_depth_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
     vkUpdateDescriptorSets(vk_context.device, write_descriptor_sets.size(), write_descriptor_sets.data(), 0, nullptr);
 
     // ========== GPU 资源获取阶段 ==========
@@ -880,6 +1003,40 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     // 转换路径追踪图像 layout 为 GENERAL
     record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+
+    // 转换 G-buffer 图像 layout 为 GENERAL
+    record_pipeline_image_barrier(command_buffer, gbuffer_position_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_normal_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_albedo_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_depth_images[frame_index],
         VK_IMAGE_ASPECT_COLOR_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1184,6 +1341,7 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     }
     picking_storage_buffers.clear();
     picking_storage_buffer_memories.clear();
+    destroy_gbuffer_images(&vk_context);
     destroy_path_tracing_images(&vk_context);
     destroy_framebuffers();
     vkFreeCommandBuffers(vk_context.device, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());

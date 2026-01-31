@@ -6,6 +6,7 @@ pixel perfect entity picking
 geometry / mesh abstraction
 dynamic rendering
 ray-traced hard shadow
+gbuffer
 
 # doing
 monte carlo path tracing
