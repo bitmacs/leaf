@@ -208,6 +208,10 @@ vec3 evaluateSunRadiance(vec3 direction) {
     return vec3(0.0);
 }
 
+vec3 evaluateSkyRadiance(vec3 direction) {
+    return vec3(0.5, 0.7, 1.0) * 0.05;
+}
+
 // ========== 标准路径追踪：单采样 + NEE ==========
 
 vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
@@ -220,14 +224,9 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
         RayHit hit = traceRay(origin, direction, EPSILON, 100000.0);
 
         if (!hit.hit) {
-            // 击中天空：检查是否击中太阳
             vec3 L_sun = evaluateSunRadiance(direction);
-            radiance += throughput * L_sun;
-
-            // 只在非太阳区域添加天空环境光
-            if (length(L_sun) == 0.0) {
-                radiance += throughput * vec3(0.5, 0.7, 1.0) * 0.5;
-            }
+            vec3 L_sky = evaluateSkyRadiance(direction);
+            radiance += throughput * (L_sun + L_sky);
             break;
         }
 
@@ -269,14 +268,18 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
 
         if (!bsdf_hit.hit) {
             vec3 L_sun = evaluateSunRadiance(bsdf_dir);
+            vec3 L_sky = evaluateSkyRadiance(bsdf_dir);
             if (length(L_sun) > 0.0) {
                 float pdf_sun = sunDiskPDF();
                 float mis_weight = balanceHeuristic(pdf_bsdf, pdf_sun);
-
                 vec3 brdf = hit.albedo * ONE_OVER_PI;
                 radiance += throughput * brdf * L_sun * NdotL_bsdf / pdf_bsdf * mis_weight;
             }
-            break;  // 击中光源，路径终止
+            if (length(L_sun) == 0.0 && length(L_sky) > 0.0) {
+                vec3 brdf = hit.albedo * ONE_OVER_PI;
+                radiance += throughput * brdf * L_sky * NdotL_bsdf / pdf_bsdf;
+            }
+            break;
         }
 
         // ========== 间接光照 - 路径继续 ==========
@@ -298,18 +301,15 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
 
 // 从已知首次命中继续路径追踪（共用同一条 primary ray，不再打 primary）
 // first_hit 为 primary ray 的命中结果；若未命中则只返回太阳或天空的贡献
-// 分别累加直接光与间接光。直接光 = 太阳对 primary hit (depth 0) 的贡献；间接光 = 其余（天空、depth>=1 的贡献）
+// 按 bounce 划分：直接光 = 0 或 1 次 bounce（L E、L D E）；间接光 = 2+ bounce
 void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_seed, out vec3 direct_radiance, out vec3 indirect_radiance) {
     direct_radiance = vec3(0.0);
     indirect_radiance = vec3(0.0);
 
     if (!first_hit.hit) {
         vec3 L_sun = evaluateSunRadiance(direction);
-        if (length(L_sun) > 0.0) {
-            direct_radiance = L_sun;  // primary 未命中但方向指向太阳：算直接光
-        } else {
-            indirect_radiance = vec3(0.5, 0.7, 1.0) * 0.5;  // 天空
-        }
+        vec3 L_sky = evaluateSkyRadiance(direction);
+        direct_radiance = L_sun + L_sky;  // 0 bounce：太阳/天空直接进相机 → direct
         return;
     }
 
@@ -362,12 +362,23 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
 
         if (!bsdf_hit.hit) {
             vec3 L_sun = evaluateSunRadiance(bsdf_dir);
+            vec3 L_sky = evaluateSkyRadiance(bsdf_dir);
             if (length(L_sun) > 0.0) {
                 float pdf_sun = sunDiskPDF();
                 float mis_weight = balanceHeuristic(pdf_bsdf, pdf_sun);
 
                 vec3 brdf = hit.albedo * ONE_OVER_PI;
                 vec3 contrib = throughput * brdf * L_sun * NdotL_bsdf / pdf_bsdf * mis_weight;
+                if (is_primary) {
+                    direct_radiance += contrib;
+                } else {
+                    indirect_radiance += contrib;
+                }
+            }
+            // 未命中几何且非太阳方向：视为击中天空；1 bounce → direct，2+ bounce → indirect
+            if (length(L_sun) == 0.0 && length(L_sky) > 0.0) {
+                vec3 brdf = hit.albedo * ONE_OVER_PI;
+                vec3 contrib = throughput * brdf * L_sky * NdotL_bsdf / pdf_bsdf;
                 if (is_primary) {
                     direct_radiance += contrib;
                 } else {
