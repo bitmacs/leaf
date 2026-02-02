@@ -114,6 +114,13 @@ static std::vector<VkImageView> gbuffer_position_views = {};
 static std::vector<VkImageView> gbuffer_normal_views = {};
 static std::vector<VkImageView> gbuffer_albedo_views = {};
 static std::vector<VkImageView> gbuffer_depth_views = {};
+// 直接光/间接光分离（rgba32f，与 G-buffer 同分辨率）
+static std::vector<VkImage> direct_radiance_images = {};
+static std::vector<VkDeviceMemory> direct_radiance_image_memories = {};
+static std::vector<VkImageView> direct_radiance_image_views = {};
+static std::vector<VkImage> indirect_radiance_images = {};
+static std::vector<VkDeviceMemory> indirect_radiance_image_memories = {};
+static std::vector<VkImageView> indirect_radiance_image_views = {};
 
 static std::vector<FrameState> frame_states = {}; // each in-flight frame has one frame state
 static std::vector<PickingState> picking_states = {}; // each in-flight frame has one picking state
@@ -160,7 +167,7 @@ static void create_descriptor_pools(VkContext *context) {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}, // camera + light (2 uniform buffers)
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, // picking storage buffer
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}, // acceleration structure
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 5}, // one path tracing output image + four gbuffer images
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 7}, // output + 4 gbuffer + direct radiance + indirect radiance
     };
 
     VkDescriptorPoolCreateInfo descriptor_pool_create_info = {};
@@ -230,6 +237,39 @@ static void destroy_path_tracing_images(VkContext *context) {
     path_tracing_image_views.clear();
     path_tracing_images.clear();
     path_tracing_image_memories.clear();
+}
+
+static void create_direct_indirect_radiance_images(VkContext *context, AppState *app_state) {
+    direct_radiance_images.resize(MAX_FRAMES_IN_FLIGHT);
+    direct_radiance_image_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    direct_radiance_image_views.resize(MAX_FRAMES_IN_FLIGHT);
+    indirect_radiance_images.resize(MAX_FRAMES_IN_FLIGHT);
+    indirect_radiance_image_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    indirect_radiance_image_views.resize(MAX_FRAMES_IN_FLIGHT);
+    char name[100];
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &direct_radiance_images[i], &direct_radiance_image_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &indirect_radiance_images[i], &indirect_radiance_image_memories[i]);
+        snprintf(name, sizeof(name), "direct_radiance_image_%u", i);
+        create_image_view(context, direct_radiance_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &direct_radiance_image_views[i], name);
+        snprintf(name, sizeof(name), "indirect_radiance_image_%u", i);
+        create_image_view(context, indirect_radiance_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &indirect_radiance_image_views[i], name);
+    }
+}
+
+static void destroy_direct_indirect_radiance_images(VkContext *context) {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        vkDestroyImageView(context->device, direct_radiance_image_views[i], nullptr);
+        vkDestroyImageView(context->device, indirect_radiance_image_views[i], nullptr);
+        destroy_image(context, direct_radiance_images[i], direct_radiance_image_memories[i]);
+        destroy_image(context, indirect_radiance_images[i], indirect_radiance_image_memories[i]);
+    }
+    direct_radiance_image_views.clear();
+    indirect_radiance_image_views.clear();
+    direct_radiance_images.clear();
+    indirect_radiance_images.clear();
+    direct_radiance_image_memories.clear();
+    indirect_radiance_image_memories.clear();
 }
 
 static void create_gbuffer_images(VkContext *context, AppState *app_state) {
@@ -480,6 +520,7 @@ static void app_resize(AppState *app_state) {
     }
     frame_states.clear();
     destroy_gbuffer_images(&vk_context);
+    destroy_direct_indirect_radiance_images(&vk_context);
     destroy_path_tracing_images(&vk_context);
     destroy_framebuffers();
     destroy_swap_chain(&vk_context);
@@ -488,6 +529,7 @@ static void app_resize(AppState *app_state) {
     create_swap_chain(&vk_context, app_state->width, app_state->height);
     create_framebuffers(app_state);
     create_path_tracing_images(&vk_context, app_state);
+    create_direct_indirect_radiance_images(&vk_context, app_state);
     create_gbuffer_images(&vk_context, app_state);
     frame_states.resize(MAX_FRAMES_IN_FLIGHT);
     picking_states.resize(MAX_FRAMES_IN_FLIGHT, PICKING_STATE_NONE);
@@ -556,6 +598,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
 
     create_framebuffers(app_state);
     create_path_tracing_images(&vk_context, app_state);
+    create_direct_indirect_radiance_images(&vk_context, app_state);
     create_gbuffer_images(&vk_context, app_state);
     picking_storage_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     picking_storage_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
@@ -983,6 +1026,32 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         write_descriptor_set.pImageInfo = &gbuffer_depth_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
+    {
+        VkDescriptorImageInfo direct_radiance_info = {};
+        direct_radiance_info.imageView = direct_radiance_image_views[frame_index];
+        direct_radiance_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 9;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &direct_radiance_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo indirect_radiance_info = {};
+        indirect_radiance_info.imageView = indirect_radiance_image_views[frame_index];
+        indirect_radiance_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 10;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &indirect_radiance_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
     vkUpdateDescriptorSets(vk_context.device, write_descriptor_sets.size(), write_descriptor_sets.data(), 0, nullptr);
 
     // ========== GPU 资源获取阶段 ==========
@@ -1037,6 +1106,22 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL);
     record_pipeline_image_barrier(command_buffer, gbuffer_depth_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, direct_radiance_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, indirect_radiance_images[frame_index],
         VK_IMAGE_ASPECT_COLOR_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1342,6 +1427,7 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     picking_storage_buffers.clear();
     picking_storage_buffer_memories.clear();
     destroy_gbuffer_images(&vk_context);
+    destroy_direct_indirect_radiance_images(&vk_context);
     destroy_path_tracing_images(&vk_context);
     destroy_framebuffers();
     vkFreeCommandBuffers(vk_context.device, vk_context.command_pool, MAX_FRAMES_IN_FLIGHT, command_buffers.data());

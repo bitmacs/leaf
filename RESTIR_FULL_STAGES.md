@@ -88,7 +88,7 @@
 **实现要点**：
 
 - 在 path 循环（如 `pathTraceFromHit`）内按贡献拆分：
-  - **直接**：当前 hit 对太阳的 NEE 贡献，以及若 BSDF 采样恰好击中太阳时的直接贡献（不乘之前 bounce 的 throughput）。
+  - **直接**：太阳对当前 hit 的 NEE 贡献，以及若 BSDF 采样恰好击中太阳时太阳对该 hit 的直接贡献（不乘之前 bounce 的 throughput）。
   - **间接**：其余所有贡献（第一次 bounce 之后的 throughput × 后续 NEE/BSDF 等）。
 - 输出：
   - 每像素累加 `direct_radiance` → 写入 **direct_radiance_image**。
