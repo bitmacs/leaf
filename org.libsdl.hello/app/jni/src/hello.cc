@@ -143,6 +143,10 @@ static double total_time = 0.0;  // 累计总时间，用于动画
 static CameraData camera_data[2] = {}; // [0] = scene camera, [1] = ui camera
 static std::vector<VkBuffer> camera_buffers = {}; // each in-flight frame has one camera buffer
 static std::vector<VkDeviceMemory> camera_buffer_memories = {}; // each in-flight frame has one camera buffer memory
+// ReSTIR DI-3 时域复用：上一帧场景相机独立 uniform buffer（与 UI 相机分离）
+static std::vector<VkBuffer> prev_camera_buffers = {};
+static std::vector<VkDeviceMemory> prev_camera_buffer_memories = {};
+static CameraData last_scene_camera_for_frame[2] = {}; // 每帧索引上次使用的场景相机，用于上传到 prev_camera
 
 static DirectionalLight directional_light = {
     .direction = glm::normalize(glm::vec3(0.0f, -1.0f, -1.0f)),
@@ -171,10 +175,10 @@ static void create_descriptor_pools(VkContext *context) {
     descriptor_pools.resize(MAX_FRAMES_IN_FLIGHT);
 
     VkDescriptorPoolSize descriptor_pool_sizes[] = {
-        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}, // camera + light (2 uniform buffers)
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3}, // camera + light + prev_camera (DI-3)
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, // picking storage buffer
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}, // acceleration structure
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 9}, // output + 4 gbuffer + direct + indirect + DI reservoir x2
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 13}, // output + 4 gbuffer + direct + indirect + DI reservoir x2 + DI-3 prev x4
     };
 
     VkDescriptorPoolCreateInfo descriptor_pool_create_info = {};
@@ -644,6 +648,11 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         create_buffer(&vk_context, sizeof(CameraData) * 2, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &camera_buffers[i], &camera_buffer_memories[i]);
     }
+    prev_camera_buffers.resize(MAX_FRAMES_IN_FLIGHT);
+    prev_camera_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        create_buffer(&vk_context, sizeof(CameraData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &prev_camera_buffers[i], &prev_camera_buffer_memories[i]);
+    }
 
     light_buffers.resize(MAX_FRAMES_IN_FLIGHT);
     light_buffer_memories.resize(MAX_FRAMES_IN_FLIGHT);
@@ -860,13 +869,30 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     camera_data[0].view = view;
     camera_data[0].projection = clip * projection;
 
-    void *p_data = nullptr;
-    vkMapMemory(vk_context.device, camera_buffer_memories[frame_index], 0, sizeof(CameraData) * 2, 0, &p_data);
-    memcpy(p_data, camera_data, sizeof(CameraData) * 2);
-    vkUnmapMemory(vk_context.device, camera_buffer_memories[frame_index]);
+    // ReSTIR DI-3：上一帧场景相机写入独立 uniform buffer，再上传当前帧 camera
+    {
+        static bool first_frame = true;
+        if (first_frame) {
+            last_scene_camera_for_frame[0] = camera_data[0];
+            last_scene_camera_for_frame[1] = camera_data[0];
+            first_frame = false;
+        }
+        const uint32_t prev_frame_index = (frame_index + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
+        void *p_data = nullptr;
+        vkMapMemory(vk_context.device, prev_camera_buffer_memories[frame_index], 0, sizeof(CameraData), 0, &p_data);
+        memcpy(p_data, &last_scene_camera_for_frame[prev_frame_index], sizeof(CameraData));
+        vkUnmapMemory(vk_context.device, prev_camera_buffer_memories[frame_index]);
+    }
+    {
+        void *p_data = nullptr;
+        vkMapMemory(vk_context.device, camera_buffer_memories[frame_index], 0, sizeof(CameraData) * 2, 0, &p_data);
+        memcpy(p_data, camera_data, sizeof(CameraData) * 2);
+        vkUnmapMemory(vk_context.device, camera_buffer_memories[frame_index]);
+    }
+    last_scene_camera_for_frame[frame_index] = camera_data[0];
 
     // 上传光源数据
-    p_data = nullptr;
+    void *p_data = nullptr;
     vkMapMemory(vk_context.device, light_buffer_memories[frame_index], 0, sizeof(DirectionalLight), 0, &p_data);
     memcpy(p_data, &directional_light, sizeof(DirectionalLight));
     vkUnmapMemory(vk_context.device, light_buffer_memories[frame_index]);
@@ -991,68 +1017,82 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         write_descriptor_sets.push_back(write_descriptor_set);
     }
     {
-        VkDescriptorImageInfo path_tracing_image_info = {};
-        path_tracing_image_info.imageView = path_tracing_image_views[frame_index];
-        path_tracing_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorBufferInfo prev_camera_buffer_info = {};
+        prev_camera_buffer_info.buffer = prev_camera_buffers[frame_index];
+        prev_camera_buffer_info.offset = 0;
+        prev_camera_buffer_info.range = sizeof(CameraData);
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 17;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pBufferInfo = &prev_camera_buffer_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = path_tracing_image_views[frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet write_descriptor_set = {};
         write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write_descriptor_set.dstSet = descriptor_sets[frame_index];
         write_descriptor_set.dstBinding = 4;
         write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         write_descriptor_set.descriptorCount = 1;
-        write_descriptor_set.pImageInfo = &path_tracing_image_info;
+        write_descriptor_set.pImageInfo = &image_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
     {
-        VkDescriptorImageInfo gbuffer_position_info = {};
-        gbuffer_position_info.imageView = gbuffer_position_views[frame_index];
-        gbuffer_position_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = gbuffer_position_views[frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet write_descriptor_set = {};
         write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write_descriptor_set.dstSet = descriptor_sets[frame_index];
         write_descriptor_set.dstBinding = 5;
         write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         write_descriptor_set.descriptorCount = 1;
-        write_descriptor_set.pImageInfo = &gbuffer_position_info;
+        write_descriptor_set.pImageInfo = &image_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
     {
-        VkDescriptorImageInfo gbuffer_normal_info = {};
-        gbuffer_normal_info.imageView = gbuffer_normal_views[frame_index];
-        gbuffer_normal_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = gbuffer_normal_views[frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet write_descriptor_set = {};
         write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write_descriptor_set.dstSet = descriptor_sets[frame_index];
         write_descriptor_set.dstBinding = 6;
         write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         write_descriptor_set.descriptorCount = 1;
-        write_descriptor_set.pImageInfo = &gbuffer_normal_info;
+        write_descriptor_set.pImageInfo = &image_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
     {
-        VkDescriptorImageInfo gbuffer_albedo_info = {};
-        gbuffer_albedo_info.imageView = gbuffer_albedo_views[frame_index];
-        gbuffer_albedo_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = gbuffer_albedo_views[frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet write_descriptor_set = {};
         write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write_descriptor_set.dstSet = descriptor_sets[frame_index];
         write_descriptor_set.dstBinding = 7;
         write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         write_descriptor_set.descriptorCount = 1;
-        write_descriptor_set.pImageInfo = &gbuffer_albedo_info;
+        write_descriptor_set.pImageInfo = &image_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
     {
-        VkDescriptorImageInfo gbuffer_depth_info = {};
-        gbuffer_depth_info.imageView = gbuffer_depth_views[frame_index];
-        gbuffer_depth_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = gbuffer_depth_views[frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet write_descriptor_set  = {};
         write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write_descriptor_set.dstSet = descriptor_sets[frame_index];
         write_descriptor_set.dstBinding = 8;
         write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         write_descriptor_set.descriptorCount = 1;
-        write_descriptor_set.pImageInfo = &gbuffer_depth_info;
+        write_descriptor_set.pImageInfo = &image_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
     {
@@ -1102,6 +1142,60 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write_descriptor_set.dstSet = descriptor_sets[frame_index];
         write_descriptor_set.dstBinding = 12;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &image_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    // DI-3 时域复用：上一帧 reservoir 与 G-buffer（binding 13–16）
+    const uint32_t prev_frame_index = (frame_index + MAX_FRAMES_IN_FLIGHT - 1) % MAX_FRAMES_IN_FLIGHT;
+    {
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = reservoir_di_direction_W_views[prev_frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 13;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &image_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = reservoir_di_M_w_views[prev_frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 14;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &image_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = gbuffer_position_views[prev_frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 15;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &image_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = gbuffer_normal_views[prev_frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 16;
         write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         write_descriptor_set.descriptorCount = 1;
         write_descriptor_set.pImageInfo = &image_info;
@@ -1199,6 +1293,42 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         0,
         VK_ACCESS_SHADER_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+
+    // DI-3 时域复用：上一帧 reservoir 与 G-buffer 在 compute 中只读，需保证 layout/依赖正确
+    const VkImageLayout prev_old_layout = (frame_count == 0) ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+    const VkAccessFlags prev_src_access = (frame_count == 0) ? 0 : VK_ACCESS_SHADER_WRITE_BIT;
+    record_pipeline_image_barrier(command_buffer, reservoir_di_direction_W_images[prev_frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        prev_src_access,
+        VK_ACCESS_SHADER_READ_BIT,
+        prev_old_layout,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, reservoir_di_M_w_images[prev_frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        prev_src_access,
+        VK_ACCESS_SHADER_READ_BIT,
+        prev_old_layout,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_position_images[prev_frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        prev_src_access,
+        VK_ACCESS_SHADER_READ_BIT,
+        prev_old_layout,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_normal_images[prev_frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        prev_src_access,
+        VK_ACCESS_SHADER_READ_BIT,
+        prev_old_layout,
         VK_IMAGE_LAYOUT_GENERAL);
 
     // 确保 TLAS 构建完成，对 path tracing compute shader 可见
@@ -1464,9 +1594,12 @@ void SDL_AppQuit(void *p_app_state, SDL_AppResult result)
     light_buffer_memories.clear();
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         destroy_buffer(&vk_context, camera_buffers[i], camera_buffer_memories[i]);
+        destroy_buffer(&vk_context, prev_camera_buffers[i], prev_camera_buffer_memories[i]);
     }
     camera_buffers.clear();
     camera_buffer_memories.clear();
+    prev_camera_buffers.clear();
+    prev_camera_buffer_memories.clear();
     picking_states.clear();
     for (FrameState &frame_state : frame_states) {
         for (uint32_t geometry_handle : frame_state.geometry_handles) {

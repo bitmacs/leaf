@@ -729,6 +729,11 @@ void create_descriptor_set_layout(VkContext *context) {
         {10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // indirect_radiance_image
         {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // reservoir_di_direction_W (DI-2+)
         {12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // reservoir_di_M_w (DI-2+)
+        {13, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // prev_reservoir_di_direction_W (DI-3)
+        {14, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // prev_reservoir_di_M_w (DI-3)
+        {15, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // prev_gbuffer_position (DI-3)
+        {16, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // prev_gbuffer_normal (DI-3)
+        {17, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // prev_camera (DI-3 上一帧场景相机)
     };
 
     VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info = {};
