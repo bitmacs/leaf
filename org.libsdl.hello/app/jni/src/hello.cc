@@ -121,6 +121,13 @@ static std::vector<VkImageView> direct_radiance_image_views = {};
 static std::vector<VkImage> indirect_radiance_images = {};
 static std::vector<VkDeviceMemory> indirect_radiance_image_memories = {};
 static std::vector<VkImageView> indirect_radiance_image_views = {};
+// ReSTIR DI reservoir（DI-2+）：每像素 (sun_dir.xyz, W) 与 (M, w_sel, 0, 0)
+static std::vector<VkImage> reservoir_di_direction_W_images = {};
+static std::vector<VkDeviceMemory> reservoir_di_direction_W_memories = {};
+static std::vector<VkImageView> reservoir_di_direction_W_views = {};
+static std::vector<VkImage> reservoir_di_M_w_images = {};
+static std::vector<VkDeviceMemory> reservoir_di_M_w_memories = {};
+static std::vector<VkImageView> reservoir_di_M_w_views = {};
 
 static std::vector<FrameState> frame_states = {}; // each in-flight frame has one frame state
 static std::vector<PickingState> picking_states = {}; // each in-flight frame has one picking state
@@ -167,7 +174,7 @@ static void create_descriptor_pools(VkContext *context) {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2}, // camera + light (2 uniform buffers)
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1}, // picking storage buffer
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1}, // acceleration structure
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 7}, // output + 4 gbuffer + direct radiance + indirect radiance
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 9}, // output + 4 gbuffer + direct + indirect + DI reservoir x2
     };
 
     VkDescriptorPoolCreateInfo descriptor_pool_create_info = {};
@@ -246,14 +253,26 @@ static void create_direct_indirect_radiance_images(VkContext *context, AppState 
     indirect_radiance_images.resize(MAX_FRAMES_IN_FLIGHT);
     indirect_radiance_image_memories.resize(MAX_FRAMES_IN_FLIGHT);
     indirect_radiance_image_views.resize(MAX_FRAMES_IN_FLIGHT);
+    reservoir_di_direction_W_images.resize(MAX_FRAMES_IN_FLIGHT);
+    reservoir_di_direction_W_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    reservoir_di_direction_W_views.resize(MAX_FRAMES_IN_FLIGHT);
+    reservoir_di_M_w_images.resize(MAX_FRAMES_IN_FLIGHT);
+    reservoir_di_M_w_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    reservoir_di_M_w_views.resize(MAX_FRAMES_IN_FLIGHT);
     char name[100];
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &direct_radiance_images[i], &direct_radiance_image_memories[i]);
         create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &indirect_radiance_images[i], &indirect_radiance_image_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &reservoir_di_direction_W_images[i], &reservoir_di_direction_W_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &reservoir_di_M_w_images[i], &reservoir_di_M_w_memories[i]);
         snprintf(name, sizeof(name), "direct_radiance_image_%u", i);
         create_image_view(context, direct_radiance_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &direct_radiance_image_views[i], name);
         snprintf(name, sizeof(name), "indirect_radiance_image_%u", i);
         create_image_view(context, indirect_radiance_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &indirect_radiance_image_views[i], name);
+        snprintf(name, sizeof(name), "reservoir_di_direction_W_%u", i);
+        create_image_view(context, reservoir_di_direction_W_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &reservoir_di_direction_W_views[i], name);
+        snprintf(name, sizeof(name), "reservoir_di_M_w_%u", i);
+        create_image_view(context, reservoir_di_M_w_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &reservoir_di_M_w_views[i], name);
     }
 }
 
@@ -261,15 +280,25 @@ static void destroy_direct_indirect_radiance_images(VkContext *context) {
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         vkDestroyImageView(context->device, direct_radiance_image_views[i], nullptr);
         vkDestroyImageView(context->device, indirect_radiance_image_views[i], nullptr);
+        vkDestroyImageView(context->device, reservoir_di_direction_W_views[i], nullptr);
+        vkDestroyImageView(context->device, reservoir_di_M_w_views[i], nullptr);
         destroy_image(context, direct_radiance_images[i], direct_radiance_image_memories[i]);
         destroy_image(context, indirect_radiance_images[i], indirect_radiance_image_memories[i]);
+        destroy_image(context, reservoir_di_direction_W_images[i], reservoir_di_direction_W_memories[i]);
+        destroy_image(context, reservoir_di_M_w_images[i], reservoir_di_M_w_memories[i]);
     }
     direct_radiance_image_views.clear();
     indirect_radiance_image_views.clear();
+    reservoir_di_direction_W_views.clear();
+    reservoir_di_M_w_views.clear();
     direct_radiance_images.clear();
     indirect_radiance_images.clear();
+    reservoir_di_direction_W_images.clear();
+    reservoir_di_M_w_images.clear();
     direct_radiance_image_memories.clear();
     indirect_radiance_image_memories.clear();
+    reservoir_di_direction_W_memories.clear();
+    reservoir_di_M_w_memories.clear();
 }
 
 static void create_gbuffer_images(VkContext *context, AppState *app_state) {
@@ -1027,29 +1056,55 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         write_descriptor_sets.push_back(write_descriptor_set);
     }
     {
-        VkDescriptorImageInfo direct_radiance_info = {};
-        direct_radiance_info.imageView = direct_radiance_image_views[frame_index];
-        direct_radiance_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = direct_radiance_image_views[frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet write_descriptor_set = {};
         write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write_descriptor_set.dstSet = descriptor_sets[frame_index];
         write_descriptor_set.dstBinding = 9;
         write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         write_descriptor_set.descriptorCount = 1;
-        write_descriptor_set.pImageInfo = &direct_radiance_info;
+        write_descriptor_set.pImageInfo = &image_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
     {
-        VkDescriptorImageInfo indirect_radiance_info = {};
-        indirect_radiance_info.imageView = indirect_radiance_image_views[frame_index];
-        indirect_radiance_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = indirect_radiance_image_views[frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         VkWriteDescriptorSet write_descriptor_set = {};
         write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         write_descriptor_set.dstSet = descriptor_sets[frame_index];
         write_descriptor_set.dstBinding = 10;
         write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         write_descriptor_set.descriptorCount = 1;
-        write_descriptor_set.pImageInfo = &indirect_radiance_info;
+        write_descriptor_set.pImageInfo = &image_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = reservoir_di_direction_W_views[frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 11;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &image_info;
+        write_descriptor_sets.push_back(write_descriptor_set);
+    }
+    {
+        VkDescriptorImageInfo image_info = {};
+        image_info.imageView = reservoir_di_M_w_views[frame_index];
+        image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        VkWriteDescriptorSet write_descriptor_set = {};
+        write_descriptor_set.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write_descriptor_set.dstSet = descriptor_sets[frame_index];
+        write_descriptor_set.dstBinding = 12;
+        write_descriptor_set.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        write_descriptor_set.descriptorCount = 1;
+        write_descriptor_set.pImageInfo = &image_info;
         write_descriptor_sets.push_back(write_descriptor_set);
     }
     vkUpdateDescriptorSets(vk_context.device, write_descriptor_sets.size(), write_descriptor_sets.data(), 0, nullptr);
@@ -1122,6 +1177,22 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL);
     record_pipeline_image_barrier(command_buffer, indirect_radiance_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, reservoir_di_direction_W_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, reservoir_di_M_w_images[frame_index],
         VK_IMAGE_ASPECT_COLOR_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,

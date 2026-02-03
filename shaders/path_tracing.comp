@@ -8,9 +8,9 @@
 #define MAX_DEPTH 3                    // 最大路径深度（bounce次数）
 #define SAMPLES_PER_ITERATION 1        // 每帧每像素采样次数（渐进式渲染：每帧累积少量样本）
 
-// ReSTIR DI 阶段：0=DI-0(单次NEE)，1=DI-1(单帧RIS M候选+WRS)
-#define RESTIR_DI_STAGE 1
-#define RESTIR_DI_M 1                  // DI-1 每像素太阳候选数
+// ReSTIR DI 阶段：0=DI-0(单次NEE)，1=DI-1(单帧RIS M候选+WRS)，2=DI-2(持久化 reservoir，本帧用)
+#define RESTIR_DI_STAGE 2
+#define RESTIR_DI_M 4                  // DI-1/2 每像素太阳候选数
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -31,6 +31,9 @@ layout(set = 0, binding = 7, rgba8) uniform restrict writeonly image2D gbuffer_a
 layout(set = 0, binding = 8, r32f) uniform restrict writeonly image2D gbuffer_depth_image;
 layout(set = 0, binding = 9, rgba32f) uniform restrict writeonly image2D direct_radiance_image;
 layout(set = 0, binding = 10, rgba32f) uniform restrict writeonly image2D indirect_radiance_image;
+// DI-2+：每像素 reservoir，供时域/空域复用。binding 11 = (sun_dir.xyz, W), binding 12 = (M, w_sel, 0, 0)
+layout(set = 0, binding = 11, rgba32f) uniform restrict writeonly image2D reservoir_di_direction_W_image;
+layout(set = 0, binding = 12, rgba32f) uniform restrict writeonly image2D reservoir_di_M_w_image;
 
 layout(push_constant) uniform PathTracingPushConstants {
     uint camera_index;
@@ -309,7 +312,8 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
 // 从已知首次命中继续路径追踪（共用同一条 primary ray，不再打 primary）
 // first_hit 为 primary ray 的命中结果；若未命中则只返回太阳或天空的贡献
 // 按 bounce 划分：直接光 = 0 或 1 次 bounce（L E、L D E）；间接光 = 2+ bounce
-void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_seed, out vec3 direct_radiance, out vec3 indirect_radiance) {
+// pixel_i：当前像素坐标，DI-2+ 时用于写入 reservoir
+void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_seed, out vec3 direct_radiance, out vec3 indirect_radiance, ivec2 pixel_i) {
     direct_radiance = vec3(0.0);
     indirect_radiance = vec3(0.0);
 
@@ -329,10 +333,11 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
 
         // ========== NEE（Next Event Estimation）- 光源采样 ==========
         if (is_primary && RESTIR_DI_STAGE >= 1) {
-            // DI-1：M 次太阳采样 + 单帧 WRS，无偏估计写 direct_radiance
+            // DI-1/2：M 次太阳采样 + WRS；DI-2 额外持久化 reservoir
             float W = 0.0;
             float w_sel = 0.0;
             vec3 L_sel = vec3(0.0);
+            vec3 sun_dir_sel = vec3(0.0);  // DI-2：选中样本方向，供 reservoir 存储
             vec3 brdf_primary = hit.albedo * ONE_OVER_PI;
 
             for (int m = 0; m < RESTIR_DI_M; ++m) {
@@ -357,6 +362,7 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
                 if (w_i > 0.0 && (w_sel <= 0.0 || u < w_i / W)) {
                     L_sel = L_i;
                     w_sel = w_i;
+                    sun_dir_sel = sun_dir;
                 }
             }
 
@@ -364,6 +370,12 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
                 ? (L_sel * W / (float(RESTIR_DI_M) * w_sel))
                 : vec3(0.0);
             direct_radiance += direct_contrib;
+
+            // DI-2：持久化 reservoir（选中方向、W、M、w_sel），本帧不读，仅为 DI-3/4 准备布局
+            if (RESTIR_DI_STAGE >= 2) {
+                imageStore(reservoir_di_direction_W_image, pixel_i, vec4(sun_dir_sel, W));
+                imageStore(reservoir_di_M_w_image, pixel_i, vec4(float(RESTIR_DI_M), w_sel, 0.0, 0.0));
+            }
         } else {
             // DI-0 或非 primary：单次 NEE + MIS
             vec2 u_sun = random2(seed + 100u);
@@ -497,7 +509,7 @@ void main() {
     for (int s = 0; s < SAMPLES_PER_ITERATION; ++s) {
         uint sample_seed = base_pixel_seed + uint(s) * 10000u;
         vec3 d, i;
-        pathTraceFromHit(ray_origin_world, ray_dir_world, first_hit, sample_seed, d, i);
+        pathTraceFromHit(ray_origin_world, ray_dir_world, first_hit, sample_seed, d, i, pixel_i);
         direct_radiance += d;
         indirect_radiance += i;
     }

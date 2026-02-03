@@ -727,6 +727,8 @@ void create_descriptor_set_layout(VkContext *context) {
         {8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // gbuffer depth
         {9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // direct_radiance_image
         {10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // indirect_radiance_image
+        {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // reservoir_di_direction_W (DI-2+)
+        {12, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // reservoir_di_M_w (DI-2+)
     };
 
     VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info = {};
