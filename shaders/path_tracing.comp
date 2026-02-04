@@ -370,7 +370,12 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
         if (!bsdf_hit.hit) {
             vec3 L_sun = evaluateSunRadiance(bsdf_dir);
             vec3 L_sky = evaluateSkyRadiance(bsdf_dir);
-            if (length(L_sun) > 0.0) {
+
+            // Use length² (dot(v,v)) instead of length() to avoid sqrt (length² > 0 ⇔ length > 0)
+            bool hitSun = dot(L_sun, L_sun) > 0.0;
+            bool hitSky = dot(L_sky, L_sky) > 0.0;
+
+            if (hitSun) {
                 float pdf_sun = sunDiskPDF();
                 float mis_weight = powerHeuristic(pdf_bsdf, pdf_sun);
 
@@ -383,7 +388,7 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
                 }
             }
             // 未命中几何且非太阳方向：视为击中天空；1 bounce → direct，2+ bounce → indirect
-            if (length(L_sun) == 0.0 && length(L_sky) > 0.0) {
+            if (!hitSun && hitSky) {
                 vec3 brdf = hit.albedo * ONE_OVER_PI;
                 vec3 contrib = throughput * brdf * L_sky * NdotL_bsdf / pdf_bsdf;
                 if (is_primary) {
