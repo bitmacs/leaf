@@ -37,7 +37,7 @@
 ## 三、Path Tracing 现状（简要）
 
 - **入口**：每像素 1 条 primary ray → G-buffer → `pathTraceFromHit()`，每帧 1 条路径，`pc.iteration` 做渐进。
-- **直接光**：NEE 对太阳圆盘 + 阴影射线，MIS（balance heuristic）。
+- **直接光**：NEE 对太阳圆盘 + 阴影射线，MIS（power heuristic）。
 - **间接光**：BSDF 余弦半球采样，Lambert，Russian Roulette，`MAX_DEPTH = 3`。
 - **可复用**：G-buffer 与 `first_hit`（position, normal, albedo）可直接作为 ReSTIR 的 shading point。
 

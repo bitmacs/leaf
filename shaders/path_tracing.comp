@@ -83,7 +83,7 @@ vec3 sampleCosineHemisphere(vec2 u, vec3 normal) {
     return normalize(tangent * disk.x + bitangent * disk.y + normal * z);
 }
 
-// ========== MIS 辅助函数 ==========
+// ========== MIS（power heuristic）辅助函数 ==========
 
 // 余弦加权半球采样的 PDF
 float cosineHemispherePDF(vec3 normal, vec3 direction) {
@@ -105,7 +105,12 @@ bool isDirectionInSunDisk(vec3 direction, vec3 sun_dir) {
     return cos_angle > cos_angular_radius;
 }
 
-float balanceHeuristic(float p_f, float p_g) { return p_f / (p_f + p_g); }
+// Power heuristic: w_f = p_f^β / (p_f^β + p_g^β)，取 β=2
+float powerHeuristic(float p_f, float p_g) {
+    float p_f2 = p_f * p_f;
+    float p_g2 = p_g * p_g;
+    return p_f2 / (p_f2 + p_g2);
+}
 
 RayHit traceRay(vec3 origin, vec3 direction, float t_min, float t_max) {
     RayHit hit;
@@ -169,7 +174,7 @@ void buildSunCoordinateSystem(vec3 sun_dir, out vec3 sun_x, out vec3 sun_y) {
 }
 
 // 从太阳立体角内均匀采样一个方向（NEE - Light Sampling）
-// 这是 MIS 的光源采样分支：直接在方向域采样太阳的立体角
+// 这是 MIS（power heuristic）的光源采样分支：直接在方向域采样太阳的立体角
 // 使用圆锥内均匀采样（uniform conical sampling in solid angle）
 vec3 sampleSunDiskDirection(vec2 u) {
     vec3 sun_dir = -light.direction;  // light.direction 在 CPU 端已归一化
@@ -245,7 +250,7 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
             if (sun_visible) {
                 vec3 L_sun = SUN_INTENSITY;
                 float pdf_bsdf = cosineHemispherePDF(hit.normal, sun_dir);
-                float mis_weight = balanceHeuristic(pdf_sun, pdf_bsdf);
+                float mis_weight = powerHeuristic(pdf_sun, pdf_bsdf);
 
                 vec3 brdf = hit.albedo * ONE_OVER_PI;
                 radiance += throughput * brdf * L_sun * NdotL_sun / pdf_sun * mis_weight;
@@ -271,7 +276,7 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
             vec3 L_sky = evaluateSkyRadiance(bsdf_dir);
             if (length(L_sun) > 0.0) {
                 float pdf_sun = sunDiskPDF();
-                float mis_weight = balanceHeuristic(pdf_bsdf, pdf_sun);
+                float mis_weight = powerHeuristic(pdf_bsdf, pdf_sun);
                 vec3 brdf = hit.albedo * ONE_OVER_PI;
                 radiance += throughput * brdf * L_sun * NdotL_bsdf / pdf_bsdf * mis_weight;
             }
@@ -335,7 +340,7 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
             if (sun_visible) {
                 vec3 L_sun = SUN_INTENSITY;
                 float pdf_bsdf = cosineHemispherePDF(hit.normal, sun_dir);
-                float mis_weight = balanceHeuristic(pdf_sun, pdf_bsdf);
+                float mis_weight = powerHeuristic(pdf_sun, pdf_bsdf);
 
                 vec3 brdf = hit.albedo * ONE_OVER_PI;
                 vec3 contrib = throughput * brdf * L_sun * NdotL_sun / pdf_sun * mis_weight;
@@ -365,7 +370,7 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
             vec3 L_sky = evaluateSkyRadiance(bsdf_dir);
             if (length(L_sun) > 0.0) {
                 float pdf_sun = sunDiskPDF();
-                float mis_weight = balanceHeuristic(pdf_bsdf, pdf_sun);
+                float mis_weight = powerHeuristic(pdf_bsdf, pdf_sun);
 
                 vec3 brdf = hit.albedo * ONE_OVER_PI;
                 vec3 contrib = throughput * brdf * L_sun * NdotL_bsdf / pdf_bsdf * mis_weight;
