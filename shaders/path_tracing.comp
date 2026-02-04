@@ -245,7 +245,7 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
             vec3 shadow_origin = hit.position + hit.normal * EPSILON;
             RayHit shadow_hit = traceRay(shadow_origin, sun_dir, EPSILON, 100000.0);
 
-            bool sun_visible = (!shadow_hit.hit) || (shadow_hit.t > 1000.0);
+            bool sun_visible = !shadow_hit.hit;
 
             if (sun_visible) {
                 vec3 L_sun = SUN_INTENSITY;
@@ -335,7 +335,7 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
             vec3 shadow_origin = hit.position + hit.normal * EPSILON;
             RayHit shadow_hit = traceRay(shadow_origin, sun_dir, EPSILON, 100000.0);
 
-            bool sun_visible = (!shadow_hit.hit) || (shadow_hit.t > 1000.0);
+            bool sun_visible = !shadow_hit.hit;
 
             if (sun_visible) {
                 vec3 L_sun = SUN_INTENSITY;
