@@ -290,12 +290,14 @@ vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
         // ========== 间接光照 - 路径继续 ==========
         throughput *= hit.albedo * NdotL_bsdf / pdf_bsdf;
 
-        // Russian Roulette
-        float p_continue = min(max(throughput.x, max(throughput.y, throughput.z)), 0.95);
-        if (random(seed + 300u) >= p_continue) {
-            break;
+        // Russian Roulette：depth >= 2 时才启用，避免前两跳过早终止
+        if (depth >= 2) {
+            float p_continue = min(max(throughput.x, max(throughput.y, throughput.z)), 0.95);
+            if (random(seed + 300u) >= p_continue) {
+                break;
+            }
+            throughput /= p_continue;
         }
-        throughput /= p_continue;
 
         origin = bsdf_hit.position + bsdf_hit.normal * EPSILON;
         direction = bsdf_dir;
@@ -395,11 +397,14 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
 
         throughput *= hit.albedo * NdotL_bsdf / pdf_bsdf;
 
-        float p_continue = min(max(throughput.x, max(throughput.y, throughput.z)), 0.95);
-        if (random(seed + 300u) >= p_continue) {
-            break;
+        // Russian Roulette：depth >= 2 时才启用
+        if (depth >= 2) {
+            float p_continue = min(max(throughput.x, max(throughput.y, throughput.z)), 0.95);
+            if (random(seed + 300u) >= p_continue) {
+                break;
+            }
+            throughput /= p_continue;
         }
-        throughput /= p_continue;
 
         hit = bsdf_hit;
     }
