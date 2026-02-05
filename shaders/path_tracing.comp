@@ -6,7 +6,10 @@
 
 // Monte Carlo 路径追踪参数
 #define MAX_DEPTH 3                    // 最大路径深度（bounce次数）
-#define SAMPLES_PER_ITERATION 1        // 每帧每像素采样次数（渐进式渲染：每帧累积少量样本）
+// 首 bounce 分层：NEE 与首层 BSDF 的 2D 各划分为 STRATA_X*STRATA_Y 层
+#define STRATA_X 2
+#define STRATA_Y 2
+#define STRATA_COUNT (STRATA_X * STRATA_Y)
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -218,99 +221,8 @@ vec3 evaluateSkyRadiance(vec3 direction) {
     return vec3(0.5, 0.7, 1.0) * 0.05;
 }
 
-// ========== 标准路径追踪：单采样 + NEE ==========
-
-vec3 pathTrace(vec3 origin, vec3 direction, uint pixel_seed) {
-    vec3 throughput = vec3(1.0);
-    vec3 radiance = vec3(0.0);
-
-    for (int depth = 0; depth < MAX_DEPTH; ++depth) {
-        uint seed = pixel_seed + uint(depth) * 1000u;
-
-        RayHit hit = traceRay(origin, direction, EPSILON, 100000.0);
-
-        if (!hit.hit) {
-            vec3 L_sun = evaluateSunRadiance(direction);
-            vec3 L_sky = evaluateSkyRadiance(direction);
-            radiance += throughput * (L_sun + L_sky);
-            break;
-        }
-
-        // ========== NEE（Next Event Estimation）- 光源采样 ==========
-        vec2 u_sun = random2(seed + 100u);
-        vec3 sun_dir = sampleSunDiskDirection(u_sun);
-        float pdf_sun = sunDiskPDF();
-        float NdotL_sun = max(dot(hit.normal, sun_dir), 0.0);
-
-        if (NdotL_sun > 0.0 && pdf_sun > 0.0) {
-            vec3 shadow_origin = hit.position + hit.normal * EPSILON;
-            RayHit shadow_hit = traceRay(shadow_origin, sun_dir, EPSILON, 100000.0);
-
-            bool sun_visible = !shadow_hit.hit;
-
-            if (sun_visible) {
-                vec3 L_sun = SUN_INTENSITY;
-                float pdf_bsdf = cosineHemispherePDF(hit.normal, sun_dir);
-                float mis_weight = powerHeuristic(pdf_sun, pdf_bsdf);
-
-                vec3 brdf = hit.albedo * ONE_OVER_PI;
-                radiance += throughput * brdf * L_sun * NdotL_sun / pdf_sun * mis_weight;
-            }
-        }
-
-        // ========== BSDF 采样 - 路径继续 ==========
-        vec2 u_bsdf = random2(seed + 200u);
-        vec3 bsdf_dir = sampleCosineHemisphere(u_bsdf, hit.normal);
-        float pdf_bsdf = cosineHemispherePDF(hit.normal, bsdf_dir);
-        float NdotL_bsdf = max(dot(hit.normal, bsdf_dir), 0.0);
-
-        if (NdotL_bsdf <= 0.0 || pdf_bsdf <= 0.0) {
-            break;
-        }
-
-        // 追踪 BSDF 光线，检查是否直接击中光源
-        vec3 bsdf_origin = hit.position + hit.normal * EPSILON;
-        RayHit bsdf_hit = traceRay(bsdf_origin, bsdf_dir, EPSILON, 100000.0);
-
-        if (!bsdf_hit.hit) {
-            vec3 L_sun = evaluateSunRadiance(bsdf_dir);
-            vec3 L_sky = evaluateSkyRadiance(bsdf_dir);
-            if (length(L_sun) > 0.0) {
-                float pdf_sun = sunDiskPDF();
-                float mis_weight = powerHeuristic(pdf_bsdf, pdf_sun);
-                vec3 brdf = hit.albedo * ONE_OVER_PI;
-                radiance += throughput * brdf * L_sun * NdotL_bsdf / pdf_bsdf * mis_weight;
-            }
-            if (length(L_sun) == 0.0 && length(L_sky) > 0.0) {
-                vec3 brdf = hit.albedo * ONE_OVER_PI;
-                radiance += throughput * brdf * L_sky * NdotL_bsdf / pdf_bsdf;
-            }
-            break;
-        }
-
-        // ========== 间接光照 - 路径继续 ==========
-        throughput *= hit.albedo * NdotL_bsdf / pdf_bsdf;
-
-        // Russian Roulette：depth >= 2 时才启用，避免前两跳过早终止
-        if (depth >= 2) {
-            float p_continue = min(max(throughput.x, max(throughput.y, throughput.z)), 0.95);
-            if (random(seed + 300u) >= p_continue) {
-                break;
-            }
-            throughput /= p_continue;
-        }
-
-        origin = bsdf_hit.position + bsdf_hit.normal * EPSILON;
-        direction = bsdf_dir;
-    }
-
-    return radiance;
-}
-
-// 从已知首次命中继续路径追踪（共用同一条 primary ray，不再打 primary）
-// first_hit 为 primary ray 的命中结果；若未命中则只返回太阳或天空的贡献
-// 按 bounce 划分：直接光 = 0 或 1 次 bounce（L E、L D E）；间接光 = 2+ bounce
-void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_seed, out vec3 direct_radiance, out vec3 indirect_radiance) {
+// 从已知首次命中继续路径追踪。stratum_ij 仅用于首 bounce 的 NEE/BSDF 2D 分层。
+void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_seed, int stratum_i, int stratum_j, out vec3 direct_radiance, out vec3 indirect_radiance) {
     direct_radiance = vec3(0.0);
     indirect_radiance = vec3(0.0);
 
@@ -329,7 +241,9 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
         bool is_primary = (depth == 0);
 
         // ========== NEE（Next Event Estimation）- 光源采样 ==========
-        vec2 u_sun = random2(seed + 100u);
+        vec2 u_sun = is_primary
+            ? vec2((float(stratum_i) + random(seed + 100u)) / float(STRATA_X), (float(stratum_j) + random(seed + 101u)) / float(STRATA_Y))
+            : random2(seed + 100u);
         vec3 sun_dir = sampleSunDiskDirection(u_sun);
         float pdf_sun = sunDiskPDF();
         float NdotL_sun = max(dot(hit.normal, sun_dir), 0.0);
@@ -356,7 +270,9 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
         }
 
         // ========== BSDF 采样 - 路径继续 ==========
-        vec2 u_bsdf = random2(seed + 200u);
+        vec2 u_bsdf = is_primary
+            ? vec2((float(stratum_i) + random(seed + 200u)) / float(STRATA_X), (float(stratum_j) + random(seed + 201u)) / float(STRATA_Y))
+            : random2(seed + 200u);
         vec3 bsdf_dir = sampleCosineHemisphere(u_bsdf, hit.normal);
         float pdf_bsdf = cosineHemispherePDF(hit.normal, bsdf_dir);
         float NdotL_bsdf = max(dot(hit.normal, bsdf_dir), 0.0);
@@ -462,28 +378,29 @@ void main() {
         imageStore(gbuffer_depth_image, pixel_i, vec4(1e10, 0.0, 0.0, 0.0));
     }
 
-    // 从同一 primary 命中继续 path tracing（多条路径样本，不同 seed）
-    // 阶段 1：分别累加直接光与间接光
+    // 首 bounce 分层：STRATA_COUNT 条 path，各对应 NEE/BSDF 2D 的一层
     vec3 direct_radiance = vec3(0.0);
     vec3 indirect_radiance = vec3(0.0);
-    for (int s = 0; s < SAMPLES_PER_ITERATION; ++s) {
-        uint sample_seed = base_pixel_seed + uint(s) * 10000u;
-        vec3 d, i;
-        pathTraceFromHit(ray_origin_world, ray_dir_world, first_hit, sample_seed, d, i);
-        direct_radiance += d;
-        indirect_radiance += i;
+    for (int j = 0; j < STRATA_Y; ++j) {
+        for (int i = 0; i < STRATA_X; ++i) {
+            uint stratum_seed = base_pixel_seed + uint(j * STRATA_X + i) * 10000u;
+            vec3 dr, ir;
+            pathTraceFromHit(ray_origin_world, ray_dir_world, first_hit, stratum_seed, i, j, dr, ir);
+            direct_radiance += dr;
+            indirect_radiance += ir;
+        }
     }
-    direct_radiance /= float(SAMPLES_PER_ITERATION);
-    indirect_radiance /= float(SAMPLES_PER_ITERATION);
+    direct_radiance /= float(STRATA_COUNT);
+    indirect_radiance /= float(STRATA_COUNT);
 
     // 写入直接光/间接光 HDR 图
     imageStore(direct_radiance_image, pixel_i, vec4(direct_radiance, 1.0));
     imageStore(indirect_radiance_image, pixel_i, vec4(indirect_radiance, 1.0));
 
     // ========== 合成：direct + indirect → tone map → output_image ==========
-    vec3 current_radiance = direct_radiance + indirect_radiance;
+    vec3 L = direct_radiance + indirect_radiance;
     const float exposure = 2.0; // 曝光值：1.0 = 正常，2.0 = 一档亮，0.5 = 一档暗
-    vec3 ldr_color = vec3(1.0) - exp(-current_radiance * exposure); // Reinhard tone mapping
+    vec3 ldr_color = vec3(1.0) - exp(-L * exposure); // Reinhard tone mapping
     ldr_color = clamp(ldr_color, 0.0, 1.0);                        // 钳位到 [0,1]
     ldr_color = pow(ldr_color, vec3(1.0 / 2.2));                  // Gamma 校正 (sRGB)
 

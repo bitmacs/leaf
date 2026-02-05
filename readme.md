@@ -9,7 +9,9 @@ ray-traced hard shadow
 gbuffer
 
 # doing
-monte carlo path tracing
+单帧独立、无时域累积的monte carlo path tracing
+空间分层采样
+蓝噪声
 
 # todo
 ReSTIR GI
