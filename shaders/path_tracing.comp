@@ -68,6 +68,31 @@ vec2 random2(uint seed) {
     );
 }
 
+// Halton 基逆（base 2/3），n 从 0 起；用于 LDS
+float radicalInverse2(uint n) {
+    float r = 0.0, b = 0.5;
+    for (int i = 0; i < 16; i++) {
+        r += float(n & 1u) * b;
+        n >>= 1u;
+        b *= 0.5;
+    }
+    return r;
+}
+float radicalInverse3(uint n) {
+    float r = 0.0, b = 1.0 / 3.0;
+    for (int i = 0; i < 16; i++) {
+        r += float(n % 3u) * b;
+        n /= 3u;
+        b /= 3.0;
+    }
+    return r;
+}
+// Halton(2,3) 第 k 个点（k 从 0 起）；避免 (0,0) 用 k+1
+vec2 halton23(uint k) {
+    k += 1u;
+    return vec2(radicalInverse2(k), radicalInverse3(k));
+}
+
 // 在单位圆盘上均匀采样
 vec2 sampleDisk(vec2 u) {
     float r = sqrt(u.x);
@@ -221,8 +246,8 @@ vec3 evaluateSkyRadiance(vec3 direction) {
     return vec3(0.5, 0.7, 1.0) * 0.05;
 }
 
-// 从已知首次命中继续路径追踪。stratum_ij 仅用于首 bounce 的 NEE/BSDF 2D 分层。
-void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_seed, int stratum_i, int stratum_j, out vec3 direct_radiance, out vec3 indirect_radiance) {
+// 从已知首次命中继续路径追踪。stratum_ij 仅首 bounce 有效；lds_shift 为 Cranley-Patterson 平移。
+void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_seed, int stratum_i, int stratum_j, vec2 lds_shift_sun, vec2 lds_shift_bsdf, out vec3 direct_radiance, out vec3 indirect_radiance) {
     direct_radiance = vec3(0.0);
     indirect_radiance = vec3(0.0);
 
@@ -242,7 +267,7 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
 
         // ========== NEE（Next Event Estimation）- 光源采样 ==========
         vec2 u_sun = is_primary
-            ? vec2((float(stratum_i) + random(seed + 100u)) / float(STRATA_X), (float(stratum_j) + random(seed + 101u)) / float(STRATA_Y))
+            ? fract(halton23(uint(stratum_j * STRATA_X + stratum_i)) + lds_shift_sun)
             : random2(seed + 100u);
         vec3 sun_dir = sampleSunDiskDirection(u_sun);
         float pdf_sun = sunDiskPDF();
@@ -270,9 +295,13 @@ void pathTraceFromHit(vec3 origin, vec3 direction, RayHit first_hit, uint pixel_
         }
 
         // ========== BSDF 采样 - 路径继续 ==========
-        vec2 u_bsdf = is_primary
-            ? vec2((float(stratum_i) + random(seed + 200u)) / float(STRATA_X), (float(stratum_j) + random(seed + 201u)) / float(STRATA_Y))
-            : random2(seed + 200u);
+        vec2 u_bsdf;
+        if (is_primary) {
+            uint k = uint(stratum_j * STRATA_X + stratum_i) + 1u;
+            u_bsdf = fract(vec2(radicalInverse3(k), radicalInverse2(k)) + lds_shift_bsdf);  // 与 NEE 维互换以去相关
+        } else {
+            u_bsdf = random2(seed + 200u);
+        }
         vec3 bsdf_dir = sampleCosineHemisphere(u_bsdf, hit.normal);
         float pdf_bsdf = cosineHemispherePDF(hit.normal, bsdf_dir);
         float NdotL_bsdf = max(dot(hit.normal, bsdf_dir), 0.0);
@@ -378,14 +407,16 @@ void main() {
         imageStore(gbuffer_depth_image, pixel_i, vec4(1e10, 0.0, 0.0, 0.0));
     }
 
-    // 首 bounce 分层：STRATA_COUNT 条 path，各对应 NEE/BSDF 2D 的一层
+    // 首 bounce LDS：Halton(2,3) + Cranley-Patterson 平移，每像素固定 shift
+    vec2 lds_shift_sun = random2(base_pixel_seed + 7777u);
+    vec2 lds_shift_bsdf = random2(base_pixel_seed + 7778u);
     vec3 direct_radiance = vec3(0.0);
     vec3 indirect_radiance = vec3(0.0);
     for (int j = 0; j < STRATA_Y; ++j) {
         for (int i = 0; i < STRATA_X; ++i) {
             uint stratum_seed = base_pixel_seed + uint(j * STRATA_X + i) * 10000u;
             vec3 dr, ir;
-            pathTraceFromHit(ray_origin_world, ray_dir_world, first_hit, stratum_seed, i, j, dr, ir);
+            pathTraceFromHit(ray_origin_world, ray_dir_world, first_hit, stratum_seed, i, j, lds_shift_sun, lds_shift_bsdf, dr, ir);
             direct_radiance += dr;
             indirect_radiance += ir;
         }
