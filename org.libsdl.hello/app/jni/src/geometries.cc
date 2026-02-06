@@ -210,6 +210,54 @@ GeometryData generate_sphere_geometry_data(float radius, uint32_t segments) {
     return geometry_data;
 }
 
+GeometryData generate_cylinder_geometry_data(float radius, float height, uint32_t radial_segments) {
+    GeometryData geometry_data;
+    const float half_h = height * 0.5f;
+    const float pi = 3.14159265f;
+
+    // 侧面：两圈顶点 (y = -half_h, y = +half_h)，法线沿径向水平向外
+    for (uint32_t ring = 0; ring < 2; ++ring) {
+        float y = (ring == 0) ? -half_h : half_h;
+        for (uint32_t i = 0; i <= radial_segments; ++i) {
+            float angle = 2.0f * pi * (float)i / (float)radial_segments;
+            float c = cosf(angle), s = sinf(angle);
+            geometry_data.vertices.push_back({{radius * c, y, radius * s}, {c, 0.0f, s}});
+        }
+    }
+    for (uint32_t i = 0; i < radial_segments; ++i) {
+        uint32_t bl = i;
+        uint32_t br = i + 1;
+        uint32_t tl = (radial_segments + 1) + i;
+        uint32_t tr = (radial_segments + 1) + i + 1;
+        geometry_data.indices.insert(geometry_data.indices.end(), {bl, tl, br, br, tl, tr});
+    }
+
+    // 顶盖：中心 + 一圈顶点，法线 (0, 1, 0)
+    uint32_t top_center = geometry_data.vertices.size();
+    geometry_data.vertices.push_back({{0.0f, half_h, 0.0f}, {0.0f, 1.0f, 0.0f}});
+    for (uint32_t i = 0; i <= radial_segments; ++i) {
+        float angle = 2.0f * pi * (float)i / (float)radial_segments;
+        geometry_data.vertices.push_back({{radius * cosf(angle), half_h, radius * sinf(angle)}, {0.0f, 1.0f, 0.0f}});
+    }
+    for (uint32_t i = 0; i < radial_segments; ++i) {
+        geometry_data.indices.insert(geometry_data.indices.end(), {top_center, top_center + 1 + i, top_center + 1 + i + 1});
+    }
+
+    // 底盖：中心 + 一圈顶点，法线 (0, -1, 0)
+    uint32_t bot_center = geometry_data.vertices.size();
+    geometry_data.vertices.push_back({{0.0f, -half_h, 0.0f}, {0.0f, -1.0f, 0.0f}});
+    for (uint32_t i = 0; i <= radial_segments; ++i) {
+        float angle = 2.0f * pi * (float)i / (float)radial_segments;
+        geometry_data.vertices.push_back({{radius * cosf(angle), -half_h, radius * sinf(angle)}, {0.0f, -1.0f, 0.0f}});
+    }
+    for (uint32_t i = 0; i < radial_segments; ++i) {
+        geometry_data.indices.insert(geometry_data.indices.end(), {bot_center, bot_center + 1 + i + 1, bot_center + 1 + i});
+    }
+
+    geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    return geometry_data;
+}
+
 uint32_t request_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_system, VkContext *context, GeometryData &&geometry_data) {
     std::lock_guard<std::mutex> lock(geometry_registry->entries_mutex);
     for (uint32_t i = 0; i < MAX_GEOMETRIES; ++i) {

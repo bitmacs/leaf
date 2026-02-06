@@ -14,6 +14,7 @@ GeometryData generate_triangle_geometry_data();
 GeometryData generate_plane_geometry_data(float width, float height, uint32_t segments);
 GeometryData generate_cube_geometry_data(float size);
 GeometryData generate_sphere_geometry_data(float radius, uint32_t segments);
+GeometryData generate_cylinder_geometry_data(float radius, float height, uint32_t radial_segments);
 
 #define MAX_GEOMETRIES 1024
 

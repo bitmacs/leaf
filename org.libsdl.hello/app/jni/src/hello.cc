@@ -641,7 +641,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         GeometryData geometry_data = generate_plane_geometry_data(4.0f, 4.0f, 2);
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
         Transform transform = {glm::vec3(0.0f, 0.0f, 0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
-        entities.push_back({2, geometry_handle, transform, glm::vec3(0.0f, 1.0f, 0.0f)});
+        entities.push_back({2, geometry_handle, transform, glm::vec3(0.5f, 0.5f, 0.5f)});
     }
     {
         GeometryData geometry_data = generate_cube_geometry_data(0.5f);
@@ -665,6 +665,13 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         glm::quat rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         Transform transform = {glm::vec3(-2.0f, 1.0f, 0.0f), rotation, glm::vec3(1.0f, 1.0f, 1.0f)};
         entities.push_back({5, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});  // 红色左侧墙
+    }
+    {
+        // 场景后方圆柱体（-Z 方向）
+        GeometryData geometry_data = generate_cylinder_geometry_data(0.3f, 0.8f, 24);
+        uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
+        Transform transform = {glm::vec3(1.25f, 0.5f, -0.5f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
+        entities.push_back({6, geometry_handle, transform, glm::vec3(0.0f, 1.0f, 0.0f)});  // 绿色圆柱（Cornell 风格，与红墙互补）
     }
 
     // 等待所有 mesh 上传完成后再进入首帧，避免“部分 mesh 不显示或很久才出现”
