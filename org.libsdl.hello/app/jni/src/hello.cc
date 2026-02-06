@@ -289,10 +289,10 @@ static void create_gbuffer_images(VkContext *context, AppState *app_state) {
     gbuffer_depth_views.resize(MAX_FRAMES_IN_FLIGHT);
     char name[100];
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_position_images[i], &gbuffer_position_memories[i]);
-        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_normal_images[i], &gbuffer_normal_memories[i]);
-        create_image(context, VK_FORMAT_R8G8B8A8_UNORM, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_albedo_images[i], &gbuffer_albedo_memories[i]);
-        create_image(context, VK_FORMAT_R32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_depth_images[i], &gbuffer_depth_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_position_images[i], &gbuffer_position_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_normal_images[i], &gbuffer_normal_memories[i]);
+        create_image(context, VK_FORMAT_R8G8B8A8_UNORM, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_albedo_images[i], &gbuffer_albedo_memories[i]);
+        create_image(context, VK_FORMAT_R32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_depth_images[i], &gbuffer_depth_memories[i]);
         snprintf(name, sizeof(name), "gbuffer_position_%u", i);
         create_image_view(context, gbuffer_position_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &gbuffer_position_views[i], name);
         snprintf(name, sizeof(name), "gbuffer_normal_%u", i);
@@ -560,8 +560,8 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
 
     app_state->render_width = app_state->width;
     app_state->render_height = app_state->height / 2;
-    app_state->path_tracing_width = app_state->render_width / 1.0f;
-    app_state->path_tracing_height = app_state->render_height / 1.0f;
+    app_state->path_tracing_width = app_state->render_width / 2.0f;
+    app_state->path_tracing_height = app_state->render_height / 2.0f;
 
     *pp_app_state = app_state;
 
@@ -1083,16 +1083,6 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     build_top_level_acceleration_structure(command_buffer, &vk_context, renderables);
 
-    // 转换路径追踪图像 layout 为 GENERAL
-    record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL);
-
     // 转换 G-buffer 图像 layout 为 GENERAL
     record_pipeline_image_barrier(command_buffer, gbuffer_position_images[frame_index],
         VK_IMAGE_ASPECT_COLOR_BIT,
@@ -1143,23 +1133,74 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL);
 
-    // 确保 TLAS 构建完成，对 path tracing compute shader 可见
+    // 确保 TLAS 构建完成后再执行 compute；置于首个使用 TLAS 的 pass（gbuffer）前即可，path tracing 同 buffer 内随后执行，可见性延续
     record_pipeline_memory_barrier(command_buffer,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
         VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
-    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline);
-    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
-
+    // Pass 1: G-buffer（仅 primary ray，写入 position/normal/albedo/depth）
     PathTracingPushConstants path_tracing_push_constants = {};
     path_tracing_push_constants.camera_index = 0;
-    path_tracing_push_constants.iteration = frame_count; // 渐进式渲染的全局迭代次数
-    vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
+    path_tracing_push_constants.iteration = frame_count;
 
     uint32_t group_count_x = (app_state->path_tracing_width + 7) / 8;
     uint32_t group_count_y = (app_state->path_tracing_height + 7) / 8;
+
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.gbuffer_compute_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
+    vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
+    vkCmdDispatch(command_buffer, group_count_x, group_count_y, 1);
+
+    // 转换路径追踪图像 layout 为 GENERAL
+    record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL);
+
+    // G-buffer 写完成 → path tracing 读
+    record_pipeline_image_barrier(command_buffer, gbuffer_position_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_normal_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_albedo_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_depth_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_GENERAL);
+
+    // Pass 2: Path tracing（读 G-buffer，不重复发射 primary ray）
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
+    vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
     vkCmdDispatch(command_buffer, group_count_x, group_count_y, 1);
 
     // 确保 compute shader 完成，path tracing 图像可以用于 transfer

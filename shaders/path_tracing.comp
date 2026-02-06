@@ -24,10 +24,10 @@ layout(set = 0, binding = 3, std140) uniform DirectionalLight {
 } light;
 
 layout(set = 0, binding = 4, rgba8) uniform restrict writeonly image2D output_image;
-layout(set = 0, binding = 5, rgba32f) uniform restrict writeonly image2D gbuffer_position_image;
-layout(set = 0, binding = 6, rgba32f) uniform restrict writeonly image2D gbuffer_normal_image;
-layout(set = 0, binding = 7, rgba8) uniform restrict writeonly image2D gbuffer_albedo_image;
-layout(set = 0, binding = 8, r32f) uniform restrict writeonly image2D gbuffer_depth_image;
+layout(set = 0, binding = 5, rgba32f) uniform restrict readonly image2D gbuffer_position_image;
+layout(set = 0, binding = 6, rgba32f) uniform restrict readonly image2D gbuffer_normal_image;
+layout(set = 0, binding = 7, rgba8) uniform restrict readonly image2D gbuffer_albedo_image;
+layout(set = 0, binding = 8, r32f) uniform restrict readonly image2D gbuffer_depth_image;
 layout(set = 0, binding = 9, rgba32f) uniform restrict writeonly image2D direct_radiance_image;
 layout(set = 0, binding = 10, rgba32f) uniform restrict writeonly image2D indirect_radiance_image;
 
@@ -401,21 +401,14 @@ void main() {
     vec3 ray_origin_world = (inv_view * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
     vec3 ray_dir_world = normalize((inv_view * far_point).xyz - (inv_view * near_point).xyz);
 
-    RayHit first_hit = traceRay(ray_origin_world, ray_dir_world, EPSILON, 100000.0);
-
-    // 写入 G-buffer（primary ray 命中结果）
-    if (first_hit.hit) {
-        imageStore(gbuffer_position_image, pixel_i, vec4(first_hit.position, 1.0));
-        imageStore(gbuffer_normal_image, pixel_i, vec4(first_hit.normal, 1.0));
-        imageStore(gbuffer_albedo_image, pixel_i, vec4(first_hit.albedo, 1.0));
-        imageStore(gbuffer_depth_image, pixel_i, vec4(first_hit.t, 0.0, 0.0, 0.0));
-    } else {
-        // 未命中：写入无效标记（depth 大值表示 sky）
-        imageStore(gbuffer_position_image, pixel_i, vec4(0.0, 0.0, 0.0, 0.0));
-        imageStore(gbuffer_normal_image, pixel_i, vec4(0.0, 0.0, 0.0, 0.0));
-        imageStore(gbuffer_albedo_image, pixel_i, vec4(0.0, 0.0, 0.0, 0.0));
-        imageStore(gbuffer_depth_image, pixel_i, vec4(1e10, 0.0, 0.0, 0.0));
-    }
+    // 从 G-buffer 读取 primary hit（由 gbuffer pass 写入，不重复发射 primary ray）
+    float depth = imageLoad(gbuffer_depth_image, pixel_i).r;
+    RayHit first_hit;
+    first_hit.hit = (depth != 1e10);
+    first_hit.t = depth;
+    first_hit.position = imageLoad(gbuffer_position_image, pixel_i).xyz;
+    first_hit.normal = imageLoad(gbuffer_normal_image, pixel_i).xyz;
+    first_hit.albedo = imageLoad(gbuffer_albedo_image, pixel_i).rgb;
 
     // 首 bounce 分层：16 个 Halton(2,3) 点 + 每像素固定 C-P shift，NEE/BSDF 维互换去相关
     vec2 lds_shift_sun = random2(base_pixel_seed + 7777u);

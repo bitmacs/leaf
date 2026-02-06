@@ -11,5 +11,6 @@ glslc -I. triangle.vert -o ../org.libsdl.hello/app/src/main/assets/shaders/trian
 glslc -I. triangle.frag -o ../org.libsdl.hello/app/src/main/assets/shaders/triangle.frag.spv
 glslc -I. picking.vert -o ../org.libsdl.hello/app/src/main/assets/shaders/picking.vert.spv
 glslc -I. picking.frag -o ../org.libsdl.hello/app/src/main/assets/shaders/picking.frag.spv
+glslc -I. gbuffer.comp -o ../org.libsdl.hello/app/src/main/assets/shaders/gbuffer.comp.spv
 glslc -I. path_tracing.comp -o ../org.libsdl.hello/app/src/main/assets/shaders/path_tracing.comp.spv
 popd > /dev/null

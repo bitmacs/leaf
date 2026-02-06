@@ -80,6 +80,7 @@ struct VkContext {
     VkPipelineLayout compute_pipeline_layout;
     std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelines;
     VkPipeline compute_pipeline;
+    VkPipeline gbuffer_compute_pipeline;
 
     // 动态加载的函数指针
     PFN_vkCmdSetCullMode vkCmdSetCullMode;
@@ -142,7 +143,7 @@ void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology,
 
 VkPipeline get_pipeline(VkContext *context, PipelineKey pipeline_key);
 
-void create_compute_pipeline(VkContext *context, const char *shader_name);
+void create_compute_pipeline(VkContext *context, const char *shader_name, VkPipeline *out_pipeline);
 
 void record_pipeline_image_barrier(VkCommandBuffer command_buffer, VkImage image, VkImageAspectFlags aspect_mask, VkPipelineStageFlags src_stage_flags, VkPipelineStageFlags dst_stage_flags, VkAccessFlags src_access_mask, VkAccessFlags dst_access_mask, VkImageLayout src_layout, VkImageLayout dst_layout);
 
