@@ -93,6 +93,17 @@ vec2 halton23(uint k) {
     return vec2(radicalInverse2(k), radicalInverse3(k));
 }
 
+// Primary ray jitter: 32×32 瓦片 Halton(2,3) + 每帧 Cranley-Patterson 平移（LDS，非蓝噪声纹理）
+#define JITTER_TILE 32u
+vec2 primaryJitterLDS(uvec2 pixel, uvec2 image_size, uint iteration) {
+    uint tx = pixel.x % JITTER_TILE;
+    uint ty = pixel.y % JITTER_TILE;
+    uint idx = tx + ty * JITTER_TILE;
+    vec2 u = halton23(idx);
+    vec2 shift = random2(pcg_hash(iteration));
+    return fract(u + shift) - 0.5;
+}
+
 // 在单位圆盘上均匀采样
 vec2 sampleDisk(vec2 u) {
     float r = sqrt(u.x);
@@ -377,9 +388,8 @@ void main() {
     mat4 inv_view = inverse(cam.view);
     mat4 inv_proj = inverse(cam.projection);
 
-    // 使用 sample 0 的射线作为 primary（与 G-buffer 一致）；只 trace 一次，同时写 G-buffer 并作为 path 起点
-    uint primary_seed = base_pixel_seed + 0u * 10000u;
-    vec2 jitter = random2(primary_seed) - 0.5;
+    // Primary ray LDS jitter
+    vec2 jitter = primaryJitterLDS(pixel, image_size, pc.iteration);
     vec2 uv = (vec2(pixel) + vec2(0.5) + jitter) / vec2(image_size);
     vec2 ndc = uv * 2.0 - 1.0;
 
@@ -407,7 +417,7 @@ void main() {
         imageStore(gbuffer_depth_image, pixel_i, vec4(1e10, 0.0, 0.0, 0.0));
     }
 
-    // 首 bounce LDS：Halton(2,3) + Cranley-Patterson 平移，每像素固定 shift
+    // 首 bounce 分层：16 个 Halton(2,3) 点 + 每像素固定 C-P shift，NEE/BSDF 维互换去相关
     vec2 lds_shift_sun = random2(base_pixel_seed + 7777u);
     vec2 lds_shift_bsdf = random2(base_pixel_seed + 7778u);
     vec3 direct_radiance = vec3(0.0);
