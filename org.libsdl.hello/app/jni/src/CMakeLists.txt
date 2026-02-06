@@ -31,4 +31,4 @@ add_library(main SHARED
     camera.cc
     files.cc
 )
-target_link_libraries(main PRIVATE SDL3::SDL3 vulkan glm)
+target_link_libraries(main PRIVATE SDL3::SDL3 vulkan glm cgltf)

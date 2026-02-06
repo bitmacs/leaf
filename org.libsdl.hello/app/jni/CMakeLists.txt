@@ -17,6 +17,10 @@ add_subdirectory(glm)
 #add_subdirectory(SDL_mixer)
 #add_subdirectory(SDL_ttf)
 
+add_library(cgltf INTERFACE)
+target_include_directories(cgltf INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/cgltf)
+target_compile_definitions(cgltf INTERFACE CGLTF_IMPLEMENTATION CGLTF_WRITE_IMPLEMENTATION)
+
 # Your game and its CMakeLists.txt are in a subfolder named "src"
 add_subdirectory(src)
 
