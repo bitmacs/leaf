@@ -512,8 +512,8 @@ static void app_resize(AppState *app_state) {
 
     app_state->render_width = app_state->width;
     app_state->render_height = app_state->height / 2;
-    app_state->path_tracing_width = app_state->render_width / 1.0f;
-    app_state->path_tracing_height = app_state->render_height / 1.0f;
+    app_state->path_tracing_width = app_state->render_width / 2.0f;
+    app_state->path_tracing_height = app_state->render_height / 2.0f;
 
     picking_states.clear();
     for (FrameState &frame_state : frame_states) {
@@ -631,31 +631,32 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
     camera.position = glm::vec3(4.34f, 3.42f, 5.78f);
     camera.orientation = glm::quat(0.93f, -0.21f, 0.31f, 0.07f);
 
+    uint32_t next_entity_id = 1;
     {
         GeometryData geometry_data = generate_triangle_geometry_data();
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
-        Transform transform = {glm::vec3(0.0f, 0.5f, 0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
-        entities.push_back({1, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});
+        Transform transform = {glm::vec3(0.0f, 0.5f, 0.25f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
+        entities.push_back({next_entity_id++, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});
     }
     {
-        GeometryData geometry_data = generate_plane_geometry_data(4.0f, 4.0f, 2);
+        GeometryData geometry_data = generate_plane_geometry_data(5.0f, 5.0f, 2);
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
         Transform transform = {glm::vec3(0.0f, 0.0f, 0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
-        entities.push_back({2, geometry_handle, transform, glm::vec3(0.5f, 0.5f, 0.5f)});
+        entities.push_back({next_entity_id++, geometry_handle, transform, glm::vec3(0.5f, 0.5f, 0.5f)});
     }
     {
         GeometryData geometry_data = generate_cube_geometry_data(0.5f);
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
         // 位置在三角形左前方：三角形在 (0, 0.5, 0)，立方体在 (-1.0, 0.5, 1.0)
         Transform transform = {glm::vec3(-1.0f, 0.5f, 1.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
-        entities.push_back({3, geometry_handle, transform, glm::vec3(0.0f, 0.0f, 1.0f)});  // 蓝色立方体
+        entities.push_back({next_entity_id++, geometry_handle, transform, glm::vec3(0.0f, 0.0f, 1.0f)});  // 蓝色立方体
     }
     {
         GeometryData geometry_data = generate_sphere_geometry_data(0.25f, 32);  // 半径0.25，32段细分
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
         // 位置在三角形前方、立方体的对面：三角形在 (0, 0.5, 0)，立方体在 (-1.0, 0.5, 1.0)，球体在 (1.0, 0.5, 1.0)
         Transform transform = {glm::vec3(1.0f, 0.5f, 1.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
-        entities.push_back({4, geometry_handle, transform, glm::vec3(1.0f, 1.0f, 0.0f)});  // 黄色球体
+        entities.push_back({next_entity_id++, geometry_handle, transform, glm::vec3(1.0f, 1.0f, 0.0f)});  // 黄色球体
     }
     {
         // 左侧墙（Cornell box风格）- 竖着的，面向+x
@@ -664,14 +665,24 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         // 绕Z轴旋转-90度，使平面变成YZ平面（垂直），法线指向+X方向
         glm::quat rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         Transform transform = {glm::vec3(-2.0f, 1.0f, 0.0f), rotation, glm::vec3(1.0f, 1.0f, 1.0f)};
-        entities.push_back({5, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});  // 红色左侧墙
+        entities.push_back({next_entity_id++, geometry_handle, transform, glm::vec3(1.0f, 0.0f, 0.0f)});  // 红色左侧墙
     }
     {
         // 场景后方圆柱体（-Z 方向）
         GeometryData geometry_data = generate_cylinder_geometry_data(0.3f, 0.8f, 24);
         uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
         Transform transform = {glm::vec3(1.25f, 0.5f, -0.5f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), glm::vec3(1.0f, 1.0f, 1.0f)};
-        entities.push_back({6, geometry_handle, transform, glm::vec3(0.0f, 1.0f, 0.0f)});  // 绿色圆柱（Cornell 风格，与红墙互补）
+        entities.push_back({next_entity_id++, geometry_handle, transform, glm::vec3(0.0f, 1.0f, 0.0f)});  // 绿色圆柱（Cornell 风格，与红墙互补）
+    }
+    {
+        std::vector<GeometryData> gltf_geometry_data = load_gltf_geometry_data("models/wooden_fox_kit_figure/scene.gltf");
+        glm::vec3 gltf_color(0.85f, 0.85f, 0.9f);
+        for (GeometryData &geometry_data: gltf_geometry_data) {
+            uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
+            glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            Transform transform = {glm::vec3(0.0f, 0.0f, -1.5f), rotation, glm::vec3(0.1f, 0.1f, 0.1f)};
+            entities.push_back({next_entity_id++, geometry_handle, transform, gltf_color});
+        }
     }
 
     // 等待所有 mesh 上传完成后再进入首帧，避免“部分 mesh 不显示或很久才出现”

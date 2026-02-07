@@ -771,11 +771,11 @@ void create_compute_pipeline_layout(VkContext *context, size_t push_constant_siz
 }
 
 void create_shader_module(VkContext *context, const char *filepath, VkShaderModule *shader_module) {
-    auto code = read_binary_file(filepath);
+    auto file_bytes = read_binary_file(filepath);
     VkShaderModuleCreateInfo shader_module_create_info = {};
     shader_module_create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    shader_module_create_info.codeSize = code.size();
-    shader_module_create_info.pCode = (const uint32_t *) code.data();
+    shader_module_create_info.codeSize = file_bytes.size();
+    shader_module_create_info.pCode = (const uint32_t *) file_bytes.data();
     VkResult result = vkCreateShaderModule(context->device, &shader_module_create_info, nullptr, shader_module);
     assert(result == VK_SUCCESS);
 }

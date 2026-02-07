@@ -1,0 +1,11 @@
+Model Information:
+* title:	Wooden Fox Kit Figure
+* source:	https://sketchfab.com/3d-models/wooden-fox-kit-figure-0391c2c8088c4db3924708e9a9c2bcd2
+* author:	Yogensia (https://sketchfab.com/yogensia)
+
+Model License:
+* license type:	CC-BY-NC-SA-4.0 (http://creativecommons.org/licenses/by-nc-sa/4.0/)
+* requirements:	Author must be credited. No commercial use. Modified versions must have the same license.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Wooden Fox Kit Figure" (https://sketchfab.com/3d-models/wooden-fox-kit-figure-0391c2c8088c4db3924708e9a9c2bcd2) by Yogensia (https://sketchfab.com/yogensia) licensed under CC-BY-NC-SA-4.0 (http://creativecommons.org/licenses/by-nc-sa/4.0/)

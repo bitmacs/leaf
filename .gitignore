@@ -4,4 +4,5 @@ local.properties
 .gradle/
 .cxx/
 .idea/
+.cache/
 .vscode/

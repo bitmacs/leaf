@@ -2,6 +2,7 @@
 
 #include "tasks.h"
 #include "vk.h"
+#include <string>
 #include <vector>
 
 struct GeometryData {
@@ -15,6 +16,8 @@ GeometryData generate_plane_geometry_data(float width, float height, uint32_t se
 GeometryData generate_cube_geometry_data(float size);
 GeometryData generate_sphere_geometry_data(float radius, uint32_t segments);
 GeometryData generate_cylinder_geometry_data(float radius, float height, uint32_t radial_segments);
+
+std::vector<GeometryData> load_gltf_geometry_data(const std::string &filepath);
 
 #define MAX_GEOMETRIES 1024
 

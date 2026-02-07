@@ -1,5 +1,7 @@
 #include "geometries.h"
+#include "files.h"
 #include <cassert>
+#include <cgltf.h>
 #include <cmath>
 #include <mutex>
 
@@ -256,6 +258,112 @@ GeometryData generate_cylinder_geometry_data(float radius, float height, uint32_
 
     geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     return geometry_data;
+}
+
+// cgltf 文件读取回调：用 SDL_LoadFile 支持从 assets 加载（含 Android）
+static cgltf_result file_read(const cgltf_memory_options *memory_options,
+                              const cgltf_file_options *file_options,
+                              const char *path, cgltf_size *size, void **data) {
+    size_t file_size = 0;
+    void *file_data = SDL_LoadFile(path, &file_size);
+    assert(file_data);
+    *size = file_size;
+    *data = file_data;
+    return cgltf_result_success;
+}
+
+static void file_release(const cgltf_memory_options *memory_options,
+                         const cgltf_file_options *file_options,
+                         void *data, cgltf_size size) { SDL_free(data); }
+
+// Z-up → Y-up 转换（Blender/部分 DCC：X 右 Y 前 Z 上 → 引擎：X 右 Y 上 Z 前）
+//
+// 轴对应关系（当前矩阵实际效果）：
+//   引擎 X' = Blender X   （左右不变）
+//   引擎 Y' = Blender Z   （原“上”→ 引擎“上”）
+//   引擎 Z' = -Blender Y  （原“前”→ 引擎“后”，故实例常再绕 Y 转 180° 朝相机）
+// 即 (x,y,z) → (x, z, -y)。法线用同一矩阵变换。
+//
+// 3x3 列主序 M，out = M*in：col0=(1,0,0) col1=(0,0,-1) col2=(0,1,0)
+static const float gltf_to_engine[9] = {
+    1.f, 0.f, 0.f, 0.f, 0.f, -1.f, 0.f, 1.f, 0.f
+};
+
+static void transform_axis(float out[3], float x, float y, float z, const float M[9]) {
+    out[0] = M[0] * x + M[3] * y + M[6] * z;
+    out[1] = M[1] * x + M[4] * y + M[7] * z;
+    out[2] = M[2] * x + M[5] * y + M[8] * z;
+}
+
+static void extract_primitive(const cgltf_primitive *primitive, std::vector<Vertex> &vertices, std::vector<uint32_t> &indices) {
+    assert(primitive->type == cgltf_primitive_type_triangles);
+
+    const cgltf_accessor *position_accessor = cgltf_find_accessor(primitive, cgltf_attribute_type_position, 0);
+    const cgltf_accessor *normal_accessor = cgltf_find_accessor(primitive, cgltf_attribute_type_normal, 0);
+    assert(position_accessor && position_accessor->type == cgltf_type_vec3);
+    assert(normal_accessor && normal_accessor->type == cgltf_type_vec3);
+
+    const cgltf_size position_floats = cgltf_num_components(position_accessor->type) * position_accessor->count;
+    std::vector<float> position_data(position_floats);
+    cgltf_size unpacked = cgltf_accessor_unpack_floats(position_accessor, position_data.data(), position_floats);
+    assert(unpacked == position_floats);
+
+    const cgltf_size normal_floats = cgltf_num_components(normal_accessor->type) * normal_accessor->count;
+    std::vector<float> normal_data(normal_floats);
+    unpacked = cgltf_accessor_unpack_floats(normal_accessor, normal_data.data(), normal_floats);
+    assert(unpacked == normal_floats);
+
+    const cgltf_accessor *index_accessor = primitive->indices;
+    assert(index_accessor);
+    indices.resize(index_accessor->count);
+
+    unpacked = cgltf_accessor_unpack_indices(index_accessor, indices.data(), sizeof(uint32_t), index_accessor->count);
+    assert(unpacked == index_accessor->count);
+
+    vertices.reserve(position_accessor->count);
+
+    for (cgltf_size position_index = 0; position_index < position_accessor->count; ++position_index) {
+        Vertex vertex = {};
+        float px = position_data[3 * position_index];
+        float py = position_data[3 * position_index + 1];
+        float pz = position_data[3 * position_index + 2];
+        float nx = normal_data[3 * position_index];
+        float ny = normal_data[3 * position_index + 1];
+        float nz = normal_data[3 * position_index + 2];
+        transform_axis(vertex.position, px, py, pz, gltf_to_engine);
+        transform_axis(vertex.normal, nx, ny, nz, gltf_to_engine);
+        vertices.push_back(vertex);
+    }
+}
+
+std::vector<GeometryData> load_gltf_geometry_data(const std::string &filepath) {
+    std::vector<GeometryData> result;
+
+    std::vector<char> file_bytes = read_binary_file(filepath);
+
+    cgltf_options options = {};
+    options.file.read = file_read;
+    options.file.release = file_release;
+
+    cgltf_data *data = nullptr;
+    cgltf_result parse_result = cgltf_parse(&options, file_bytes.data(), file_bytes.size(), &data);
+    assert(parse_result == cgltf_result_success && data);
+
+    cgltf_result load_result = cgltf_load_buffers(&options, data, filepath.c_str());
+    assert(load_result == cgltf_result_success);
+
+    for (cgltf_size mesh_index = 0; mesh_index < data->meshes_count; ++mesh_index) {
+        cgltf_mesh *mesh = &data->meshes[mesh_index];
+        for (cgltf_size primitive_index = 0; primitive_index < mesh->primitives_count; ++primitive_index) {
+            GeometryData geometry_data = {};
+            geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            extract_primitive(&mesh->primitives[primitive_index], geometry_data.vertices, geometry_data.indices);
+            result.push_back(std::move(geometry_data));
+        }
+    }
+
+    cgltf_free(data);
+    return result;
 }
 
 uint32_t request_geometry(GeometryRegistry *geometry_registry, TaskSystem *task_system, VkContext *context, GeometryData &&geometry_data) {

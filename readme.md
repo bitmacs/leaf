@@ -11,13 +11,13 @@ gbuffer
 空间分层采样
 
 # doing
+glTF model
 
 # todo
 蓝噪声
 ReSTIR GI
 gizmo
 font rendering ( bitmap )
-glTF model
 pbr
 bent normal
 terrian
