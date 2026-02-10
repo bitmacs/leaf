@@ -285,17 +285,9 @@ static void file_release(const cgltf_memory_options *memory_options,
 // 即 (x,y,z) → (x, z, -y)。法线用同一矩阵变换。
 //
 // 3x3 列主序 M，out = M*in：col0=(1,0,0) col1=(0,0,-1) col2=(0,1,0)
-static const float gltf_to_engine[9] = {
-    1.f, 0.f, 0.f, 0.f, 0.f, -1.f, 0.f, 1.f, 0.f
-};
+static const glm::mat3 gltf_to_engine = {1.f, 0.f, 0.f,0.f, 1.f, 0.f, 0.f, 0.f, 1.f};
 
-static void transform_axis(float out[3], float x, float y, float z, const float M[9]) {
-    out[0] = M[0] * x + M[3] * y + M[6] * z;
-    out[1] = M[1] * x + M[4] * y + M[7] * z;
-    out[2] = M[2] * x + M[5] * y + M[8] * z;
-}
-
-static void extract_primitive(const cgltf_primitive *primitive, std::vector<Vertex> &vertices, std::vector<uint32_t> &indices) {
+static void extract_primitive(const cgltf_primitive *primitive, std::vector<Vertex> &vertices, std::vector<uint32_t> &indices, AABB &out_aabb) {
     assert(primitive->type == cgltf_primitive_type_triangles);
 
     const cgltf_accessor *position_accessor = cgltf_find_accessor(primitive, cgltf_attribute_type_position, 0);
@@ -330,13 +322,25 @@ static void extract_primitive(const cgltf_primitive *primitive, std::vector<Vert
         float nx = normal_data[3 * position_index];
         float ny = normal_data[3 * position_index + 1];
         float nz = normal_data[3 * position_index + 2];
-        transform_axis(vertex.position, px, py, pz, gltf_to_engine);
-        transform_axis(vertex.normal, nx, ny, nz, gltf_to_engine);
+
+        glm::vec3 v = gltf_to_engine * glm::vec3(px, py, pz);
+        vertex.position[0] = v.x;
+        vertex.position[1] = v.y;
+        vertex.position[2] = v.z;
+
+        glm::vec3 n = gltf_to_engine * glm::vec3(nx, ny, nz);
+        vertex.normal[0] = n.x;
+        vertex.normal[1] = n.y;
+        vertex.normal[2] = n.z;
+
         vertices.push_back(vertex);
+
+        out_aabb.max = glm::max(out_aabb.max, v);
+        out_aabb.min = glm::min(out_aabb.min, v);
     }
 }
 
-std::vector<GeometryData> load_gltf_geometry_data(const std::string &filepath) {
+std::vector<GeometryData> load_gltf_geometry_data(const std::string &filepath, AABB &out_aabb) {
     std::vector<GeometryData> result;
 
     std::vector<char> file_bytes = read_binary_file(filepath);
@@ -357,7 +361,7 @@ std::vector<GeometryData> load_gltf_geometry_data(const std::string &filepath) {
         for (cgltf_size primitive_index = 0; primitive_index < mesh->primitives_count; ++primitive_index) {
             GeometryData geometry_data = {};
             geometry_data.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-            extract_primitive(&mesh->primitives[primitive_index], geometry_data.vertices, geometry_data.indices);
+            extract_primitive(&mesh->primitives[primitive_index], geometry_data.vertices, geometry_data.indices, out_aabb);
             result.push_back(std::move(geometry_data));
         }
     }

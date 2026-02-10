@@ -11,13 +11,18 @@ struct GeometryData {
     VkPrimitiveTopology primitive_topology;
 };
 
+struct AABB {
+    glm::vec3 min;
+    glm::vec3 max;
+};
+
 GeometryData generate_triangle_geometry_data();
 GeometryData generate_plane_geometry_data(float width, float height, uint32_t segments);
 GeometryData generate_cube_geometry_data(float size);
 GeometryData generate_sphere_geometry_data(float radius, uint32_t segments);
 GeometryData generate_cylinder_geometry_data(float radius, float height, uint32_t radial_segments);
 
-std::vector<GeometryData> load_gltf_geometry_data(const std::string &filepath);
+std::vector<GeometryData> load_gltf_geometry_data(const std::string &filepath, AABB &out_aabb);
 
 #define MAX_GEOMETRIES 1024
 

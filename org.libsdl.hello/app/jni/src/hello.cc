@@ -675,12 +675,39 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         entities.push_back({next_entity_id++, geometry_handle, transform, glm::vec3(0.0f, 1.0f, 0.0f)});  // 绿色圆柱（Cornell 风格，与红墙互补）
     }
     {
-        std::vector<GeometryData> gltf_geometry_data = load_gltf_geometry_data("models/wooden_fox_kit_figure/scene.gltf");
+        AABB aabb = {glm::vec3(FLT_MAX), glm::vec3(-FLT_MAX)};
+        // std::vector<GeometryData> gltf_geometry_data = load_gltf_geometry_data("models/wooden_fox_kit_figure/scene.gltf", aabb);
+        std::vector<GeometryData> gltf_geometry_data = load_gltf_geometry_data("models/Suzanne/glTF/Suzanne.gltf", aabb);
         glm::vec3 gltf_color(0.85f, 0.85f, 0.9f);
+        glm::vec3 scale = glm::vec3(1.0f, 1.0f, 1.0f);
+        {
+            glm::vec3 extent = aabb.max - aabb.min;
+            float max_extent = std::max(extent.x, std::max(extent.y, extent.z));
+            scale = glm::vec3(1.0f / max_extent);
+        }
+        glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        glm::vec3 translation = glm::vec3(0.0f, (aabb.max.y - aabb.min.y) / 2.0f * scale.y, 1.5f);
         for (GeometryData &geometry_data: gltf_geometry_data) {
             uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
-            glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-            Transform transform = {glm::vec3(0.0f, 0.0f, -1.5f), rotation, glm::vec3(0.1f, 0.1f, 0.1f)};
+            Transform transform = {translation, rotation, scale};
+            entities.push_back({next_entity_id++, geometry_handle, transform, gltf_color});
+        }
+    }
+    {
+        AABB aabb = {glm::vec3(FLT_MAX), glm::vec3(-FLT_MAX)};
+        std::vector<GeometryData> gltf_geometry_data = load_gltf_geometry_data("models/Duck/glTF/Duck.gltf", aabb);
+        glm::vec3 gltf_color(0.85f, 0.85f, 0.9f);
+        glm::vec3 scale = glm::vec3(1.0f, 1.0f, 1.0f);
+        {
+            glm::vec3 extent = aabb.max - aabb.min;
+            float max_extent = std::max(extent.x, std::max(extent.y, extent.z));
+            scale = glm::vec3(1.0f / max_extent);
+        }
+        glm::quat rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        glm::vec3 translation = glm::vec3(0.0f, 0.0f, -1.5f);
+        for (GeometryData &geometry_data: gltf_geometry_data) {
+            uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
+            Transform transform = {translation, rotation, scale};
             entities.push_back({next_entity_id++, geometry_handle, transform, gltf_color});
         }
     }
