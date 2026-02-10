@@ -80,7 +80,6 @@ struct VkContext {
     VkPipelineLayout compute_pipeline_layout;
     std::unordered_map<PipelineKey, VkPipeline, PipelineKeyHash> pipelines;
     VkPipeline compute_pipeline;
-    VkPipeline gbuffer_compute_pipeline;
 
     // 动态加载的函数指针
     PFN_vkCmdSetCullMode vkCmdSetCullMode;
@@ -139,7 +138,7 @@ void create_compute_pipeline_layout(VkContext *context, size_t push_constant_siz
 
 void create_shader_module(VkContext *context, const char *filepath, VkShaderModule *shader_module);
 
-void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology, VkPolygonMode polygon_mode, bool depth_test_enabled, bool depth_write_enabled, VkFormat color_image_format, VkFormat depth_image_format, const char *vertex_shader_name, const char *fragment_shader_name);
+void create_graphics_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology, VkPolygonMode polygon_mode, bool depth_test_enabled, bool depth_write_enabled, uint32_t color_image_count, VkFormat *color_image_formats, VkFormat depth_image_format, const char *vertex_shader_name, const char *fragment_shader_name);
 
 VkPipeline get_pipeline(VkContext *context, PipelineKey pipeline_key);
 
@@ -161,7 +160,8 @@ void create_semaphore(VkContext *context, VkSemaphore *semaphore);
 
 void create_fence(VkContext *context, bool signaled, VkFence *fence);
 
-void begin_rendering(VkContext *context, VkCommandBuffer command_buffer, VkImageView color_image_view, VkClearColorValue *clear_color_value, VkImageView depth_image_view, VkClearDepthStencilValue *clear_depth_stencil_value, uint32_t width, uint32_t height);
+void begin_rendering(VkContext *context, VkCommandBuffer command_buffer,
+                     uint32_t color_image_count, VkImageView color_image_views[], VkClearColorValue *clear_color_values[], VkImageView depth_image_view, VkClearDepthStencilValue *clear_depth_stencil_value, uint32_t width, uint32_t height);
 
 void end_rendering(VkContext *context, VkCommandBuffer command_buffer);
 

@@ -66,8 +66,8 @@ struct AppState {
     uint32_t height; // 窗口高度（swap chain 尺寸）
     uint32_t render_width; // 渲染宽度
     uint32_t render_height; // 渲染高度
-    uint32_t path_tracing_width;  // path tracing 渲染宽度
-    uint32_t path_tracing_height; // path tracing 渲染高度
+    uint32_t path_tracing_width;  // G-buffer / Path tracing 渲染宽度（一致）
+    uint32_t path_tracing_height; // G-buffer / Path tracing 渲染高度（一致）
 };
 
 static TaskSystem task_system = {};
@@ -116,6 +116,10 @@ static std::vector<VkImageView> gbuffer_position_views = {};
 static std::vector<VkImageView> gbuffer_normal_views = {};
 static std::vector<VkImageView> gbuffer_albedo_views = {};
 static std::vector<VkImageView> gbuffer_depth_views = {};
+// gbuffer pass 用的 depth-stencil 附件（仅用于深度测试）
+static std::vector<VkImage> gbuffer_depth_stencil_images = {};
+static std::vector<VkDeviceMemory> gbuffer_depth_stencil_memories = {};
+static std::vector<VkImageView> gbuffer_depth_stencil_views = {};
 // 直接光/间接光分离（rgba32f，与 G-buffer 同分辨率）
 static std::vector<VkImage> direct_radiance_images = {};
 static std::vector<VkDeviceMemory> direct_radiance_image_memories = {};
@@ -250,8 +254,8 @@ static void create_direct_indirect_radiance_images(VkContext *context, AppState 
     indirect_radiance_image_views.resize(MAX_FRAMES_IN_FLIGHT);
     char name[100];
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &direct_radiance_images[i], &direct_radiance_image_memories[i]);
-        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->render_width, app_state->render_height, VK_IMAGE_USAGE_STORAGE_BIT, &indirect_radiance_images[i], &indirect_radiance_image_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &direct_radiance_images[i], &direct_radiance_image_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &indirect_radiance_images[i], &indirect_radiance_image_memories[i]);
         snprintf(name, sizeof(name), "direct_radiance_image_%u", i);
         create_image_view(context, direct_radiance_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &direct_radiance_image_views[i], name);
         snprintf(name, sizeof(name), "indirect_radiance_image_%u", i);
@@ -287,12 +291,17 @@ static void create_gbuffer_images(VkContext *context, AppState *app_state) {
     gbuffer_normal_views.resize(MAX_FRAMES_IN_FLIGHT);
     gbuffer_albedo_views.resize(MAX_FRAMES_IN_FLIGHT);
     gbuffer_depth_views.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_depth_stencil_images.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_depth_stencil_memories.resize(MAX_FRAMES_IN_FLIGHT);
+    gbuffer_depth_stencil_views.resize(MAX_FRAMES_IN_FLIGHT);
+    VkImageUsageFlags color_image_usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT /* for imageLoad in compute shader */;
     char name[100];
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_position_images[i], &gbuffer_position_memories[i]);
-        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_normal_images[i], &gbuffer_normal_memories[i]);
-        create_image(context, VK_FORMAT_R8G8B8A8_UNORM, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_albedo_images[i], &gbuffer_albedo_memories[i]);
-        create_image(context, VK_FORMAT_R32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_STORAGE_BIT, &gbuffer_depth_images[i], &gbuffer_depth_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, color_image_usage, &gbuffer_position_images[i], &gbuffer_position_memories[i]);
+        create_image(context, VK_FORMAT_R32G32B32A32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, color_image_usage, &gbuffer_normal_images[i], &gbuffer_normal_memories[i]);
+        create_image(context, VK_FORMAT_R8G8B8A8_UNORM, app_state->path_tracing_width, app_state->path_tracing_height, color_image_usage, &gbuffer_albedo_images[i], &gbuffer_albedo_memories[i]);
+        create_image(context, VK_FORMAT_R32_SFLOAT, app_state->path_tracing_width, app_state->path_tracing_height, color_image_usage, &gbuffer_depth_images[i], &gbuffer_depth_memories[i]);
+        create_image(context, context->depth_image_format, app_state->path_tracing_width, app_state->path_tracing_height, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &gbuffer_depth_stencil_images[i], &gbuffer_depth_stencil_memories[i]);
         snprintf(name, sizeof(name), "gbuffer_position_%u", i);
         create_image_view(context, gbuffer_position_images[i], VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &gbuffer_position_views[i], name);
         snprintf(name, sizeof(name), "gbuffer_normal_%u", i);
@@ -301,6 +310,8 @@ static void create_gbuffer_images(VkContext *context, AppState *app_state) {
         create_image_view(context, gbuffer_albedo_images[i], VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, &gbuffer_albedo_views[i], name);
         snprintf(name, sizeof(name), "gbuffer_depth_%u", i);
         create_image_view(context, gbuffer_depth_images[i], VK_FORMAT_R32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, &gbuffer_depth_views[i], name);
+        snprintf(name, sizeof(name), "gbuffer_depth_stencil_%u", i);
+        create_image_view(context, gbuffer_depth_stencil_images[i], context->depth_image_format, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, &gbuffer_depth_stencil_views[i], name);
     }
 }
 
@@ -310,23 +321,28 @@ static void destroy_gbuffer_images(VkContext *context) {
         vkDestroyImageView(context->device, gbuffer_normal_views[i], nullptr);
         vkDestroyImageView(context->device, gbuffer_albedo_views[i], nullptr);
         vkDestroyImageView(context->device, gbuffer_depth_views[i], nullptr);
+        vkDestroyImageView(context->device, gbuffer_depth_stencil_views[i], nullptr);
         destroy_image(context, gbuffer_position_images[i], gbuffer_position_memories[i]);
         destroy_image(context, gbuffer_normal_images[i], gbuffer_normal_memories[i]);
         destroy_image(context, gbuffer_albedo_images[i], gbuffer_albedo_memories[i]);
         destroy_image(context, gbuffer_depth_images[i], gbuffer_depth_memories[i]);
+        destroy_image(context, gbuffer_depth_stencil_images[i], gbuffer_depth_stencil_memories[i]);
     }
     gbuffer_position_views.clear();
     gbuffer_normal_views.clear();
     gbuffer_albedo_views.clear();
     gbuffer_depth_views.clear();
+    gbuffer_depth_stencil_views.clear();
     gbuffer_position_images.clear();
     gbuffer_normal_images.clear();
     gbuffer_albedo_images.clear();
     gbuffer_depth_images.clear();
+    gbuffer_depth_stencil_images.clear();
     gbuffer_position_memories.clear();
     gbuffer_normal_memories.clear();
     gbuffer_albedo_memories.clear();
     gbuffer_depth_memories.clear();
+    gbuffer_depth_stencil_memories.clear();
 }
 
 static void create_top_level_acceleration_structures(VkContext *context, uint32_t max_instance_count) {
@@ -678,7 +694,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         AABB aabb = {glm::vec3(FLT_MAX), glm::vec3(-FLT_MAX)};
         // std::vector<GeometryData> gltf_geometry_data = load_gltf_geometry_data("models/wooden_fox_kit_figure/scene.gltf", aabb);
         std::vector<GeometryData> gltf_geometry_data = load_gltf_geometry_data("models/Suzanne/glTF/Suzanne.gltf", aabb);
-        glm::vec3 gltf_color(0.85f, 0.85f, 0.9f);
+        glm::vec3 color(1.0f, 0.4f, 0.0f);
         glm::vec3 scale = glm::vec3(1.0f, 1.0f, 1.0f);
         {
             glm::vec3 extent = aabb.max - aabb.min;
@@ -690,13 +706,13 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         for (GeometryData &geometry_data: gltf_geometry_data) {
             uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
             Transform transform = {translation, rotation, scale};
-            entities.push_back({next_entity_id++, geometry_handle, transform, gltf_color});
+            entities.push_back({next_entity_id++, geometry_handle, transform, color});
         }
     }
     {
         AABB aabb = {glm::vec3(FLT_MAX), glm::vec3(-FLT_MAX)};
         std::vector<GeometryData> gltf_geometry_data = load_gltf_geometry_data("models/Duck/glTF/Duck.gltf", aabb);
-        glm::vec3 gltf_color(0.85f, 0.85f, 0.9f);
+        glm::vec3 color(0.85f, 0.85f, 0.9f);
         glm::vec3 scale = glm::vec3(1.0f, 1.0f, 1.0f);
         {
             glm::vec3 extent = aabb.max - aabb.min;
@@ -708,7 +724,7 @@ SDL_AppResult SDL_AppInit(void **pp_app_state, int argc, char *argv[])
         for (GeometryData &geometry_data: gltf_geometry_data) {
             uint32_t geometry_handle = request_geometry(&geometry_registry, &task_system, &vk_context, std::move(geometry_data));
             Transform transform = {translation, rotation, scale};
-            entities.push_back({next_entity_id++, geometry_handle, transform, gltf_color});
+            entities.push_back({next_entity_id++, geometry_handle, transform, color});
         }
     }
 
@@ -1121,32 +1137,135 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
     build_top_level_acceleration_structure(command_buffer, &vk_context, renderables);
 
-    // 转换 G-buffer 图像 layout 为 GENERAL
+    // 转换 G-buffer 颜色附件为 COLOR_ATTACHMENT_OPTIMAL，depth-stencil 为 DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     record_pipeline_image_barrier(command_buffer, gbuffer_position_images[frame_index],
         VK_IMAGE_ASPECT_COLOR_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         0,
-        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL);
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     record_pipeline_image_barrier(command_buffer, gbuffer_normal_images[frame_index],
         VK_IMAGE_ASPECT_COLOR_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         0,
-        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL);
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     record_pipeline_image_barrier(command_buffer, gbuffer_albedo_images[frame_index],
         VK_IMAGE_ASPECT_COLOR_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         0,
-        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_depth_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_depth_stencil_images[frame_index],
+        VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        0,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+    // pass 1: gbuffer（光栅化 MRT：position / normal / albedo / linear depth）
+    VkImageView gbuffer_color_views[] = {
+        gbuffer_position_views[frame_index],
+        gbuffer_normal_views[frame_index],
+        gbuffer_albedo_views[frame_index],
+        gbuffer_depth_views[frame_index],
+    };
+    VkClearColorValue gbuffer_clear_position = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}};
+    VkClearColorValue gbuffer_clear_normal = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}};
+    VkClearColorValue gbuffer_clear_albedo = {.float32 = {0.0f, 0.0f, 0.0f, 0.0f}};
+    VkClearColorValue gbuffer_clear_depth = {.float32 = {1e10f, 0.0f, 0.0f, 0.0f}};  // 无命中标记，与 path_tracing 一致
+    VkClearColorValue *gbuffer_clear_colors[] = {&gbuffer_clear_position, &gbuffer_clear_normal, &gbuffer_clear_albedo, &gbuffer_clear_depth};
+    VkClearDepthStencilValue gbuffer_clear_ds = {.depth = 1.0f, .stencil = 0};
+    begin_rendering(&vk_context, command_buffer, 4, gbuffer_color_views, gbuffer_clear_colors, gbuffer_depth_stencil_views[frame_index], &gbuffer_clear_ds, app_state->path_tracing_width, app_state->path_tracing_height);
+
+    PipelineKey pipeline_key = {};
+    pipeline_key.primitive_topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    pipeline_key.polygon_mode = VK_POLYGON_MODE_FILL;
+    pipeline_key.depth_test_enabled = true;
+    pipeline_key.depth_write_enabled = true;
+    pipeline_key.shaders_hash = hash_strings("gbuffer", "gbuffer");
+    VkPipeline pipeline = get_pipeline(&vk_context, pipeline_key);
+
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_context.pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
+    set_viewport(command_buffer, 0, 0, app_state->path_tracing_width, app_state->path_tracing_height);
+    set_scissor(command_buffer, 0, 0, app_state->path_tracing_width, app_state->path_tracing_height);
+    vk_context.vkCmdSetCullMode(command_buffer, VK_CULL_MODE_NONE);
+
+    for (const Renderable &renderable : renderables) {
+        Geometry geometry = geometry_registry.entries[renderable.geometry_handle].geometry;
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(command_buffer, 0, 1, &geometry.vertex_buffer, offsets);
+        if (geometry.index_count > 0) {
+            vkCmdBindIndexBuffer(command_buffer, geometry.index_buffer, 0, geometry.index_type);
+        }
+        PushConstants push_constants = {};
+        push_constants.model = renderable.model;
+        push_constants.color = renderable.color;
+        push_constants.camera_index = 0;
+        push_constants.entity_id = renderable.entity_id;
+        vkCmdPushConstants(command_buffer, vk_context.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &push_constants);
+        if (geometry.index_count > 0) {
+            vkCmdDrawIndexed(command_buffer, geometry.index_count, 1, 0, 0, 0);
+        } else {
+            vkCmdDraw(command_buffer, geometry.vertex_count, 1, 0, 0);
+        }
+    }
+
+    end_rendering(&vk_context, command_buffer);
+
+    // G-buffer 颜色附件写完成 → 转为 GENERAL 供 path tracing compute 读取
+    record_pipeline_image_barrier(command_buffer, gbuffer_position_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_normal_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_GENERAL);
+    record_pipeline_image_barrier(command_buffer, gbuffer_albedo_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_IMAGE_LAYOUT_GENERAL);
     record_pipeline_image_barrier(command_buffer, gbuffer_depth_images[frame_index],
+        VK_IMAGE_ASPECT_COLOR_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_IMAGE_LAYOUT_GENERAL);
+
+    // 转换 direct / indirect 辐照度图与 path_tracing 输出图为 GENERAL（path tracing 的 descriptor 绑定了 output_image，须为 GENERAL）
+    record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
         VK_IMAGE_ASPECT_COLOR_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1171,84 +1290,31 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL);
 
-    // 确保 TLAS 构建完成后再执行 compute；置于首个使用 TLAS 的 pass（gbuffer）前即可，path tracing 同 buffer 内随后执行，可见性延续
+    // 确保 TLAS 构建完成后再执行 path tracing compute
     record_pipeline_memory_barrier(command_buffer,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
         VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
-    // Pass 1: G-buffer（仅 primary ray，写入 position/normal/albedo/depth）
     PathTracingPushConstants path_tracing_push_constants = {};
     path_tracing_push_constants.camera_index = 0;
     path_tracing_push_constants.iteration = frame_count;
-
     uint32_t group_count_x = (app_state->path_tracing_width + 7) / 8;
     uint32_t group_count_y = (app_state->path_tracing_height + 7) / 8;
 
-    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.gbuffer_compute_pipeline);
-    vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
-    vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
-    vkCmdDispatch(command_buffer, group_count_x, group_count_y, 1);
-
-    // 转换路径追踪图像 layout 为 GENERAL
-    record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL);
-
-    // G-buffer 写完成 → path tracing 读
-    record_pipeline_image_barrier(command_buffer, gbuffer_position_images[frame_index],
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_GENERAL,
-        VK_IMAGE_LAYOUT_GENERAL);
-    record_pipeline_image_barrier(command_buffer, gbuffer_normal_images[frame_index],
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_GENERAL,
-        VK_IMAGE_LAYOUT_GENERAL);
-    record_pipeline_image_barrier(command_buffer, gbuffer_albedo_images[frame_index],
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_GENERAL,
-        VK_IMAGE_LAYOUT_GENERAL);
-    record_pipeline_image_barrier(command_buffer, gbuffer_depth_images[frame_index],
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_WRITE_BIT,
-        VK_ACCESS_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_GENERAL,
-        VK_IMAGE_LAYOUT_GENERAL);
-
-    // Pass 2: Path tracing（读 G-buffer，不重复发射 primary ray）
+    // pass 2: path tracing（读 gbuffer，写 direct/indirect radiance 与 output_image）
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline);
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, vk_context.compute_pipeline_layout, 0, 1, &descriptor_sets[frame_index], 0, nullptr);
     vkCmdPushConstants(command_buffer, vk_context.compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PathTracingPushConstants), &path_tracing_push_constants);
     vkCmdDispatch(command_buffer, group_count_x, group_count_y, 1);
 
-    // 确保 compute shader 完成，path tracing 图像可以用于 transfer
+    // path tracing 写完成 → 用于 transfer
     record_pipeline_memory_barrier(command_buffer,
                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                                   VK_PIPELINE_STAGE_TRANSFER_BIT,
                                   VK_ACCESS_SHADER_WRITE_BIT,
                                   VK_ACCESS_TRANSFER_READ_BIT);
-
-    // 转换 path tracing 图像 layout 为 TRANSFER_SRC_OPTIMAL
     record_pipeline_image_barrier(command_buffer, path_tracing_images[frame_index],
                                   VK_IMAGE_ASPECT_COLOR_BIT,
                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1291,9 +1357,10 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
     VkClearColorValue clear_color_value = {.float32 = {0.5f, 0.8f, 1.0f, 1.0f}}; // 轻松活泼的天空蓝色 (RGB: 128, 204, 255)
     // VkClearColorValue clear_color_value = {.float32 = {0.5f, 1.0f, 0.8f}}; // 薄荷绿
     // VkClearColorValue clear_color_value = {.float32 = {0.98f, 0.92f, 0.95f, 1.0f}}; // 樱花粉 (RGB: 250, 235, 242)
+    VkClearColorValue *clear_color_values[] = {&clear_color_value};
     VkClearDepthStencilValue clear_depth_stencil_value = {.depth = 1.0f, .stencil = 0};
-    // 使用渲染尺寸
-    begin_rendering(&vk_context, command_buffer, color_image_views[frame_index], &clear_color_value, depth_image_views[frame_index], &clear_depth_stencil_value, app_state->render_width, app_state->render_height);
+    VkImageView scene_color_image_views[] = {color_image_views[frame_index]};
+    begin_rendering(&vk_context, command_buffer, 1, scene_color_image_views, clear_color_values, depth_image_views[frame_index], &clear_depth_stencil_value, app_state->render_width, app_state->render_height);
 
     for (const Renderable &renderable : renderables) {
         PipelineKey pipeline_key = {};
@@ -1351,7 +1418,7 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
                                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
-        begin_rendering(&vk_context, command_buffer, VK_NULL_HANDLE, nullptr, depth_image_views[frame_index], nullptr, app_state->render_width, app_state->render_height);
+        begin_rendering(&vk_context, command_buffer,0,  nullptr, nullptr, depth_image_views[frame_index], nullptr, app_state->render_width, app_state->render_height);
 
         for (const Renderable &renderable : renderables) {
             PipelineKey pipeline_key = {};
@@ -1421,8 +1488,8 @@ SDL_AppResult SDL_AppIterate(void *p_app_state)
 
         // Blit path tracing 结果到屏幕上半部分
         blit_image(command_buffer, path_tracing_images[frame_index], vk_context.swap_chain_images[image_index],
-                   0, 0, app_state->path_tracing_width, app_state->path_tracing_height, // 源区域：path tracing 图像
-                   0, 0, app_state->render_width, app_state->render_height); // 目标区域：屏幕上半部分（拉伸填满）
+                   0, 0, app_state->path_tracing_width, app_state->path_tracing_height,
+                   0, 0, app_state->render_width, app_state->render_height);
 
         // Blit 光栅化渲染结果到屏幕下半部分（水平居中，底部对齐，保持原始尺寸）
         blit_image(command_buffer, color_images[frame_index], vk_context.swap_chain_images[image_index],

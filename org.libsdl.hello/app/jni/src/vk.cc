@@ -573,9 +573,15 @@ void create_compute_pipeline(VkContext *context, const char *shader_name, VkPipe
 
 void create_pipelines(VkContext *context) {
     // shader 名称（不包含路径和扩展名），函数会自动添加 shaders/ 前缀和 .vert.spv/.frag.spv 后缀
-    create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, true, context->surface_format, context->depth_image_format, "triangle", "triangle");
-    create_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, false, VK_FORMAT_UNDEFINED, context->depth_image_format, "picking", "picking");
-    create_compute_pipeline(context, "gbuffer", &context->gbuffer_compute_pipeline);
+    create_graphics_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, true, 1, &context->surface_format, context->depth_image_format, "triangle", "triangle");
+    create_graphics_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, false, 0, nullptr, context->depth_image_format, "picking", "picking");
+    VkFormat gbuffer_color_formats[] = {
+        VK_FORMAT_R32G32B32A32_SFLOAT, // position
+        VK_FORMAT_R32G32B32A32_SFLOAT, // normal
+        VK_FORMAT_R8G8B8A8_UNORM,      // albedo
+        VK_FORMAT_R32_SFLOAT,          // depth (linear)
+    };
+    create_graphics_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, true, 4, gbuffer_color_formats, context->depth_image_format, "gbuffer", "gbuffer");
     create_compute_pipeline(context, "path_tracing", &context->compute_pipeline);
 }
 
@@ -780,9 +786,9 @@ void create_shader_module(VkContext *context, const char *filepath, VkShaderModu
     assert(result == VK_SUCCESS);
 }
 
-void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology, VkPolygonMode polygon_mode,
-                     bool depth_test_enabled, bool depth_write_enabled, VkFormat color_image_format, VkFormat depth_image_format,
-                     const char *vertex_shader_name, const char *fragment_shader_name) {
+void create_graphics_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology, VkPolygonMode polygon_mode,
+                              bool depth_test_enabled, bool depth_write_enabled, uint32_t color_image_count, VkFormat *color_image_formats, VkFormat depth_image_format,
+                              const char *vertex_shader_name, const char *fragment_shader_name) {
     if (primitive_topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || primitive_topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP) {
         assert(polygon_mode == VK_POLYGON_MODE_LINE); // polygon mode must be line for line list or line strip topology
     }
@@ -831,17 +837,15 @@ void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology,
     rasterization_state_create_info.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterization_state_create_info.lineWidth = 1.0f;
 
-    std::vector<VkPipelineColorBlendAttachmentState> color_blend_attachment_states = {};
-    if (color_image_format != VK_FORMAT_UNDEFINED) {
-        VkPipelineColorBlendAttachmentState color_blend_attachment_state = {};
-        color_blend_attachment_state.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-        color_blend_attachment_state.blendEnable = VK_FALSE;
-        color_blend_attachment_states.push_back(color_blend_attachment_state);
+    std::vector<VkPipelineColorBlendAttachmentState> color_blend_attachment_states(color_image_count);
+    for (uint32_t i = 0; i < color_image_count; ++i) {
+        color_blend_attachment_states[i].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        color_blend_attachment_states[i].blendEnable = VK_FALSE;
     }
 
     VkPipelineColorBlendStateCreateInfo color_blend_state_create_info = {};
     color_blend_state_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    color_blend_state_create_info.attachmentCount = color_blend_attachment_states.size();
+    color_blend_state_create_info.attachmentCount = color_image_count;
     color_blend_state_create_info.pAttachments = color_blend_attachment_states.data();
 
     VkPipelineDepthStencilStateCreateInfo depth_stencil_state_create_info = {};
@@ -897,10 +901,8 @@ void create_pipeline(VkContext *context, VkPrimitiveTopology primitive_topology,
 
     VkPipelineRenderingCreateInfo rendering_info = {};
     rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    rendering_info.colorAttachmentCount = color_image_format != VK_FORMAT_UNDEFINED ? 1 : 0;
-    if (color_image_format != VK_FORMAT_UNDEFINED) {
-        rendering_info.pColorAttachmentFormats = &color_image_format;
-    }
+    rendering_info.colorAttachmentCount = color_image_count;
+    rendering_info.pColorAttachmentFormats = color_image_formats;
     if (depth_test_enabled) {
         rendering_info.depthAttachmentFormat = depth_image_format;
     }
@@ -1033,16 +1035,17 @@ void create_fence(VkContext *context, bool signaled, VkFence *fence) {
     assert(result == VK_SUCCESS);
 }
 
-void begin_rendering(VkContext *context, VkCommandBuffer command_buffer, VkImageView color_image_view, VkClearColorValue *clear_color_value, VkImageView depth_image_view, VkClearDepthStencilValue *clear_depth_stencil_value, uint32_t width, uint32_t height) {
-    VkRenderingAttachmentInfo color_attachment = {};
-    if (color_image_view) {
-        color_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        color_attachment.imageView = color_image_view;
-        color_attachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        color_attachment.loadOp = clear_color_value ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-        color_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        if (clear_color_value) {
-            color_attachment.clearValue.color = *clear_color_value;
+void begin_rendering(VkContext *context, VkCommandBuffer command_buffer,
+                     uint32_t color_image_count, VkImageView color_image_views[], VkClearColorValue *clear_color_values[], VkImageView depth_image_view, VkClearDepthStencilValue *clear_depth_stencil_value, uint32_t width, uint32_t height) {
+    std::vector<VkRenderingAttachmentInfo> color_attachments(color_image_count);
+    for (uint32_t i = 0; i < color_image_count; ++i) {
+        color_attachments[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        color_attachments[i].imageView = color_image_views[i];
+        color_attachments[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_attachments[i].loadOp = clear_color_values[i] ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        color_attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        if (clear_color_values[i]) {
+            color_attachments[i].clearValue.color = *clear_color_values[i];
         }
     }
 
@@ -1062,8 +1065,8 @@ void begin_rendering(VkContext *context, VkCommandBuffer command_buffer, VkImage
     rendering_info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     rendering_info.renderArea = {0, 0, width, height};
     rendering_info.layerCount = 1;
-    rendering_info.colorAttachmentCount = color_image_view ? 1 : 0;
-    rendering_info.pColorAttachments = color_image_view ? &color_attachment : nullptr;
+    rendering_info.colorAttachmentCount = color_image_count;
+    rendering_info.pColorAttachments = color_attachments.data();
     rendering_info.pDepthAttachment = depth_image_view ? &depth_attachment : nullptr;
     context->vkCmdBeginRendering(command_buffer, &rendering_info);
 }
@@ -1120,7 +1123,6 @@ VkDeviceAddress get_acceleration_structure_device_address(VkContext *context, Vk
 
 void cleanup_vulkan(VkContext *context) {
     vkDestroyPipeline(context->device, context->compute_pipeline, nullptr);
-    vkDestroyPipeline(context->device, context->gbuffer_compute_pipeline, nullptr);
     for (const auto &[pipeline_key, pipeline]: context->pipelines) {
         vkDestroyPipeline(context->device, pipeline, nullptr);
     }
