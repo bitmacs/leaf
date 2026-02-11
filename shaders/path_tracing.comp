@@ -6,7 +6,7 @@
 
 // Monte Carlo 路径追踪参数
 #define MAX_DEPTH 3                    // 最大路径深度（bounce次数）
-// 首 bounce 分层：NEE 与首层 BSDF 的 2D 各划分为 STRATA_X*STRATA_Y 层
+// 首 bounce 分层：NEE 与首层 BSDF 的 2D 各划分为 STRATA_X * STRATA_Y 层
 #define STRATA_X 2
 #define STRATA_Y 2
 #define STRATA_COUNT (STRATA_X * STRATA_Y)
@@ -411,6 +411,11 @@ void main() {
     first_hit.normal = imageLoad(gbuffer_normal_image, pixel_i).xyz;
     first_hit.albedo = imageLoad(gbuffer_albedo_image, pixel_i).rgb;
 
+    // 背面与 traceRay 一致：法线翻向射线方向，后续 NEE/BSDF 按正常 path tracing 计算
+    if (first_hit.hit && dot(ray_dir_world, first_hit.normal) > 0.0) {
+        first_hit.normal = -first_hit.normal;
+    }
+
     // 首 bounce 分层：16 个 Halton(2,3) 点 + 每像素固定 C-P shift，NEE/BSDF 维互换去相关
     vec2 lds_shift_sun = random2(base_pixel_seed + 7777u);
     vec2 lds_shift_bsdf = random2(base_pixel_seed + 7778u);
@@ -428,8 +433,8 @@ void main() {
     direct_radiance /= float(STRATA_COUNT);
     indirect_radiance /= float(STRATA_COUNT);
 
-    imageStore(direct_radiance_image, pixel_i, vec4(direct_radiance, 1.0));
-    imageStore(indirect_radiance_image, pixel_i, vec4(indirect_radiance, 1.0));
+    // imageStore(direct_radiance_image, pixel_i, vec4(direct_radiance, 1.0));
+    // imageStore(indirect_radiance_image, pixel_i, vec4(indirect_radiance, 1.0));
 
     vec3 L = direct_radiance + indirect_radiance;
     const float exposure = 2.0;
