@@ -29,11 +29,6 @@ struct PushConstants {
     uint32_t entity_id;
 };
 
-struct PathTracingPushConstants {
-    uint32_t camera_index;
-    uint32_t iteration;  // 渐进式渲染的全局迭代次数（每帧递增，生成不同的随机数种子）
-};
-
 struct PipelineKey {
     union {
         struct {

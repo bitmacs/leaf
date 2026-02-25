@@ -575,14 +575,6 @@ void create_pipelines(VkContext *context) {
     // shader 名称（不包含路径和扩展名），函数会自动添加 shaders/ 前缀和 .vert.spv/.frag.spv 后缀
     create_graphics_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, true, 1, &context->surface_format, context->depth_image_format, "triangle", "triangle");
     create_graphics_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, false, 0, nullptr, context->depth_image_format, "picking", "picking");
-    VkFormat gbuffer_color_formats[] = {
-        VK_FORMAT_R32G32B32A32_SFLOAT, // position
-        VK_FORMAT_R32G32B32A32_SFLOAT, // normal
-        VK_FORMAT_R8G8B8A8_UNORM,      // albedo
-        VK_FORMAT_R32_SFLOAT,          // depth (linear)
-    };
-    create_graphics_pipeline(context, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_POLYGON_MODE_FILL, true, true, 4, gbuffer_color_formats, context->depth_image_format, "gbuffer", "gbuffer");
-    create_compute_pipeline(context, "path_tracing", &context->compute_pipeline);
 }
 
 void allocate_command_buffers(VkContext *context, VkCommandPool command_pool, uint32_t count, VkCommandBuffer *command_buffers) {
@@ -727,13 +719,6 @@ void create_descriptor_set_layout(VkContext *context) {
         {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}, // picking storage buffer
         {2, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // acceleration structure
         {3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // directional light
-        {4, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // path tracing output image
-        {5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // gbuffer position
-        {6, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // gbuffer normal
-        {7, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // gbuffer albedo
-        {8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // gbuffer depth
-        {9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // direct_radiance_image
-        {10, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // indirect_radiance_image
     };
 
     VkDescriptorSetLayoutCreateInfo descriptor_set_layout_create_info = {};
